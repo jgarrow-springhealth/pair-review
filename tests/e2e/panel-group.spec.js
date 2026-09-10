@@ -112,6 +112,94 @@ test.describe('Panel Group - PR Mode', () => {
     await expect(layoutBtn).toBeVisible();
   });
 
+  test('long filename scrolls within its slot while file header controls stay visible', async ({ page }) => {
+    // Leave enough room for the controls themselves; below this width the
+    // header-level scrollbar remains the unavoidable fallback.
+    await page.setViewportSize({ width: 1800, height: 800 });
+    await page.evaluate(() => {
+      document.documentElement.setAttribute('data-chat', 'available');
+      window.dispatchEvent(new CustomEvent('chat-state-changed', { detail: { state: 'available' } }));
+    });
+
+    const header = page.locator('.d2h-file-wrapper .d2h-file-header').first();
+    const fileName = header.locator('.d2h-file-name');
+    await fileName.evaluate((element) => {
+      element.textContent = 'packages/review-interface/src/components/file-header/with/a/deliberately/long/path/that/must/remain/readable/rendered-markdown-review-controller.js';
+    });
+    const beforePanels = await header.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+    expect(beforePanels.scrollWidth).toBeLessThanOrEqual(beforePanels.clientWidth);
+
+    await page.locator('#ai-panel-toggle').click();
+    await page.locator('#chat-toggle-btn').click();
+
+    const layout = await header.evaluate((element) => {
+      const name = element.querySelector('.d2h-file-name');
+      const nameStyle = window.getComputedStyle(name);
+      const headerStyle = window.getComputedStyle(element);
+      return {
+        headerClientWidth: element.clientWidth,
+        headerScrollWidth: element.scrollWidth,
+        nameClientWidth: name.clientWidth,
+        nameScrollWidth: name.scrollWidth,
+        nameFlexShrink: nameStyle.flexShrink,
+        nameWhiteSpace: nameStyle.whiteSpace,
+        nameOverflowX: nameStyle.overflowX,
+        overflowX: headerStyle.overflowX,
+        flexWrap: headerStyle.flexWrap,
+        position: headerStyle.position,
+        controlsDoNotShrink: Array.from(element.children)
+          .filter((child) => child !== name)
+          .every((child) => window.getComputedStyle(child).flexShrink === '0'),
+        controlsAreVisible: Array.from(element.children)
+          .filter((child) => child !== name)
+          .every((child) => {
+            const headerRect = element.getBoundingClientRect();
+            const childRect = child.getBoundingClientRect();
+            return childRect.left >= headerRect.left - 1
+              && childRect.right <= headerRect.right + 1
+              && childRect.top >= headerRect.top - 1
+              && childRect.bottom <= headerRect.bottom + 1;
+          }),
+      };
+    });
+
+    expect(layout.headerClientWidth).toBeLessThan(beforePanels.clientWidth);
+    expect(layout.headerScrollWidth).toBeLessThanOrEqual(layout.headerClientWidth);
+    expect(layout.nameScrollWidth).toBeGreaterThan(layout.nameClientWidth);
+    expect(layout.nameFlexShrink).toBe('1');
+    expect(layout.nameWhiteSpace).toBe('nowrap');
+    expect(layout.nameOverflowX).toBe('auto');
+    expect(layout.overflowX).toBe('auto');
+    expect(layout.flexWrap).toBe('nowrap');
+    expect(layout.position).toBe('sticky');
+    expect(layout.controlsDoNotShrink).toBe(true);
+    expect(layout.controlsAreVisible).toBe(true);
+
+    // Exercise the filename's own horizontal wheel/trackpad scroll surface.
+    await fileName.hover();
+    await page.mouse.wheel(2000, 0);
+    await expect.poll(() => fileName.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    expect(await header.evaluate((element) => element.scrollLeft)).toBe(0);
+
+    // Horizontal overflow must not break the header's existing sticky contract.
+    const diffScrollTop = await page.locator('.diff-view').evaluate((element) => {
+      element.scrollTop = 180;
+      return element.scrollTop;
+    });
+    expect(diffScrollTop).toBeGreaterThan(0);
+    const toolbar = page.locator('.diff-toolbar');
+    await expect.poll(async () => {
+      const [headerBox, toolbarBox] = await Promise.all([
+        header.boundingBox(),
+        toolbar.boundingBox(),
+      ]);
+      return Math.abs(headerBox.y - (toolbarBox.y + toolbarBox.height));
+    }).toBeLessThanOrEqual(1);
+  });
+
   test('popover opens on layout toggle click and selects layout', async ({ page }) => {
     // Enable chat for this test (Pi not available in E2E environment)
     await page.evaluate(() => {
