@@ -14413,16 +14413,30 @@ diffs-container {
 
 .rendered-markdown-block-content code {
   padding: 0.15em 0.4em;
-  background-color: var(--color-bg-secondary);
+  /* Inline code needs a stronger visual boundary than the nearly identical
+     primary/secondary canvas colors provide. The accent-tinted fill, border,
+     and text remain theme-aware while making the token read as a code chip. */
+  background-color: var(--color-accent-light);
+  border: 1px solid var(--color-accent-primary);
   border-radius: 4px;
+  color: var(--color-text-link);
   font-family: var(--font-mono);
   font-size: 0.9em;
+  font-weight: 500;
   overflow-wrap: anywhere;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
+/* Fenced code already has its own bordered container and syntax palette; do
+   not inherit the inline chip treatment onto the code element inside it. */
 .rendered-markdown-block-content pre code {
   padding: 0;
   background: none;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font-weight: inherit;
   white-space: inherit;
   word-break: inherit;
   overflow-wrap: inherit;

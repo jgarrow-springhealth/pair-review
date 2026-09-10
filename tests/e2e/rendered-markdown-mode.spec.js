@@ -431,13 +431,23 @@ for (const { label, url, reviewApiBase } of [
       const pre = codeBlock.locator('pre');
       const code = pre.locator('code');
       const keyword = code.locator('.hljs-keyword');
+      const inlineCode = fileWrapper
+        .locator('.rendered-markdown-block', { hasText: 'Inline code sample:' })
+        .locator('code');
       await expect(keyword).toHaveText('const');
+      await expect(inlineCode).toHaveText('renderMarkdown()');
 
       const themeCases = [
-        { theme: 'light', oppositeOs: 'dark', expectedKeyword: 'rgb(215, 58, 73)' },
-        { theme: 'dark', oppositeOs: 'light', expectedKeyword: 'rgb(255, 123, 114)' }
+        {
+          theme: 'light', oppositeOs: 'dark', expectedKeyword: 'rgb(215, 58, 73)',
+          inlineText: 'rgb(9, 105, 218)', inlineBg: 'rgba(9, 105, 218, 0.1)', inlineBorder: 'rgb(9, 105, 218)'
+        },
+        {
+          theme: 'dark', oppositeOs: 'light', expectedKeyword: 'rgb(255, 123, 114)',
+          inlineText: 'rgb(88, 166, 255)', inlineBg: 'rgba(88, 166, 255, 0.15)', inlineBorder: 'rgb(88, 166, 255)'
+        }
       ];
-      for (const { theme, oppositeOs, expectedKeyword } of themeCases) {
+      for (const { theme, oppositeOs, expectedKeyword, inlineText, inlineBg, inlineBorder } of themeCases) {
         await page.emulateMedia({ colorScheme: oppositeOs });
         await selectThemePreference(page, theme);
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
@@ -447,6 +457,36 @@ for (const { label, url, reviewApiBase } of [
         }));
         expect(colors.keyword).toBe(expectedKeyword);
         expect(colors.keyword).not.toBe(colors.code);
+
+        const inlinePresentation = await inlineCode.evaluate((element) => {
+          const style = getComputedStyle(element);
+          const parentStyle = getComputedStyle(element.parentElement);
+          return {
+            color: style.color,
+            background: style.backgroundColor,
+            borderColor: style.borderColor,
+            borderWidth: style.borderWidth,
+            borderStyle: style.borderStyle,
+            fontFamily: style.fontFamily,
+            differsFromProse: style.color !== parentStyle.color
+              && style.backgroundColor !== parentStyle.backgroundColor
+          };
+        });
+        expect(inlinePresentation).toMatchObject({
+          color: inlineText,
+          background: inlineBg,
+          borderColor: inlineBorder,
+          borderWidth: '1px',
+          borderStyle: 'solid',
+          differsFromProse: true
+        });
+        expect(inlinePresentation.fontFamily).toMatch(/mono|sfmono|menlo|consolas/i);
+
+        // The inline treatment must not leak into fenced/highlighted code.
+        expect(await code.evaluate((element) => {
+          const style = getComputedStyle(element);
+          return { background: style.backgroundColor, borderWidth: style.borderWidth };
+        })).toEqual({ background: 'rgba(0, 0, 0, 0)', borderWidth: '0px' });
       }
       await selectThemePreference(page, 'system');
 

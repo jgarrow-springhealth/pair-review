@@ -871,6 +871,8 @@ async function startTestServer(port) {
       ];
       const renderedStyleSamples = [
         '',
+        'Inline code sample: use `renderMarkdown()` to render the document.',
+        '',
         '```js',
         `const highlightedValue = "${'syntax-highlight-overflow-'.repeat(16)}";`,
         '```',
