@@ -347,6 +347,50 @@ class GitHubClient {
   }
 
   /**
+   * Fetch inline comments attached to the authenticated user's pending review.
+   *
+   * GitHub's PR-wide review-comment listing does not reliably include comments
+   * that are still part of a pending review. Resolve the viewer's pending
+   * review first, then use the review-scoped REST endpoint so those private
+   * draft comments can be displayed alongside submitted comments.
+   *
+   * A pending review can be submitted or deleted between the two requests. In
+   * that case the scoped endpoint returns 404; treat it as an empty snapshot
+   * rather than failing the otherwise-valid external-comment sync.
+   *
+   * @param {Object} params
+   * @param {string} params.owner
+   * @param {string} params.repo
+   * @param {number} params.pull_number
+   * @returns {Promise<Array<Object>>} Raw review-comment objects
+   */
+  async listPendingReviewComments({ owner, repo, pull_number }) {
+    const pendingReview = await this.getPendingReviewForUser(owner, repo, pull_number);
+    if (!pendingReview || pendingReview.databaseId === undefined || pendingReview.databaseId === null) {
+      return [];
+    }
+
+    try {
+      return await this.octokit.paginate(
+        this.octokit.rest.pulls.listCommentsForReview,
+        {
+          owner,
+          repo,
+          pull_number,
+          review_id: pendingReview.databaseId,
+          per_page: 100
+        }
+      );
+    } catch (error) {
+      if (error.status === 404) {
+        logger.debug(`Pending review ${pendingReview.databaseId} changed before its comments could be fetched`);
+        return [];
+      }
+      await this.handleApiError(error, owner, repo, pull_number);
+    }
+  }
+
+  /**
    * Validate GitHub token by making a test API call
    * @returns {Promise<boolean>} Whether the token is valid
    */

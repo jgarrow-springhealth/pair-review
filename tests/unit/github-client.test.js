@@ -1873,6 +1873,112 @@ describe('GitHubClient', () => {
     });
   });
 
+  describe('listPendingReviewComments', () => {
+    it('fetches comments through the pending-review-scoped endpoint', async () => {
+      const client = new GitHubClient('test-token');
+      vi.spyOn(client, 'getPendingReviewForUser').mockResolvedValue({
+        id: 'PRR_pending',
+        databaseId: 456,
+        state: 'PENDING',
+      });
+      const draftComments = [{ id: 700, body: 'still drafting' }];
+      client.octokit.paginate = vi.fn().mockResolvedValue(draftComments);
+
+      const result = await client.listPendingReviewComments({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 42,
+      });
+
+      expect(result).toBe(draftComments);
+      expect(client.octokit.paginate).toHaveBeenCalledWith(
+        client.octokit.rest.pulls.listCommentsForReview,
+        {
+          owner: 'owner',
+          repo: 'repo',
+          pull_number: 42,
+          review_id: 456,
+          per_page: 100,
+        }
+      );
+    });
+
+    it('returns an empty array when the viewer has no pending review', async () => {
+      const client = new GitHubClient('test-token');
+      vi.spyOn(client, 'getPendingReviewForUser').mockResolvedValue(null);
+      client.octokit.paginate = vi.fn();
+
+      const result = await client.listPendingReviewComments({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 42,
+      });
+
+      expect(result).toEqual([]);
+      expect(client.octokit.paginate).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty array when the pending review has no database id', async () => {
+      const client = new GitHubClient('test-token');
+      vi.spyOn(client, 'getPendingReviewForUser').mockResolvedValue({
+        id: 'PRR_pending',
+        databaseId: null,
+        state: 'PENDING',
+      });
+      client.octokit.paginate = vi.fn();
+
+      const result = await client.listPendingReviewComments({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 42,
+      });
+
+      expect(result).toEqual([]);
+      expect(client.octokit.paginate).not.toHaveBeenCalled();
+    });
+
+    it('treats a 404 as a pending-review transition race', async () => {
+      const client = new GitHubClient('test-token');
+      vi.spyOn(client, 'getPendingReviewForUser').mockResolvedValue({
+        id: 'PRR_pending',
+        databaseId: 456,
+        state: 'PENDING',
+      });
+      const notFound = new Error('Review not found');
+      notFound.status = 404;
+      client.octokit.paginate = vi.fn().mockRejectedValue(notFound);
+
+      const result = await client.listPendingReviewComments({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 42,
+      });
+
+      expect(result).toEqual([]);
+    });
+
+    it('maps non-404 API failures through the standard GitHub error handler', async () => {
+      const client = new GitHubClient('test-token');
+      vi.spyOn(client, 'getPendingReviewForUser').mockResolvedValue({
+        id: 'PRR_pending',
+        databaseId: 456,
+        state: 'PENDING',
+      });
+      const forbidden = new Error('Forbidden');
+      forbidden.status = 403;
+      client.octokit.paginate = vi.fn().mockRejectedValue(forbidden);
+
+      await expect(client.listPendingReviewComments({
+        owner: 'owner',
+        repo: 'repo',
+        pull_number: 42,
+      })).rejects.toMatchObject({
+        name: 'GitHubApiError',
+        status: 403,
+      });
+    });
+  });
+
   describe('GitHubApiError', () => {
     it('should be an instance of Error', () => {
       const error = new GitHubApiError('test message', 401);

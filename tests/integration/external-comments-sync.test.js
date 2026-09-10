@@ -201,6 +201,37 @@ describe('POST /api/reviews/:reviewId/external-comments/sync', () => {
     expect(reply.parent_id).toBe(parent.id);
   });
 
+  it('sync includes comments from the authenticated user pending GitHub review', async () => {
+    const submitted = [makeApiRow({ id: 151, body: 'submitted comment' })];
+    const pending = [makeApiRow({ id: 152, body: 'pending draft comment' })];
+
+    class PendingAwareGitHubClient {
+      async listReviewComments() {
+        return submitted;
+      }
+
+      async listPendingReviewComments() {
+        return pending;
+      }
+    }
+
+    const app = createTestApp(db, { GitHubClient: PendingAwareGitHubClient });
+    const server = await startServer(app);
+    const res = await request(server)
+      .post(`/api/reviews/${reviewId}/external-comments/sync`)
+      .query({ source: 'github' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(2);
+    const stored = db.prepare(
+      'SELECT external_id, body FROM external_comments WHERE review_id = ? ORDER BY external_id'
+    ).all(reviewId);
+    expect(stored).toEqual([
+      { external_id: '151', body: 'submitted comment' },
+      { external_id: '152', body: 'pending draft comment' },
+    ]);
+  });
+
   it('re-sync is idempotent: second call updates rather than duplicating', async () => {
     const rows = [
       makeApiRow({ id: 201, body: 'before edit' })

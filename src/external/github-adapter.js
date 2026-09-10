@@ -4,9 +4,10 @@
  * GitHub source adapter for external review comments.
  *
  * Two responsibilities:
- *   1. `fetchComments` — delegate to the GitHubClient method that paginates
- *      `pulls.listReviewComments`. Adapter does NOT construct its own client;
- *      the caller injects it (dependency injection per CLAUDE.md).
+ *   1. `fetchComments` — combine the GitHubClient's PR-wide submitted comments
+ *      with comments from the authenticated user's pending review. Adapter does
+ *      NOT construct its own client; the caller injects it (dependency
+ *      injection per CLAUDE.md).
  *   2. `mapComment` — translate a raw GitHub REST API row into the column
  *      shape of the `external_comments` table (see `src/database.js`).
  *
@@ -126,7 +127,18 @@ function resolveCredentials(config, repository, _deps, options = {}) {
 }
 
 /**
- * Fetch all inline review comments for a pull request from GitHub.
+ * Fetch all inline review comments for a pull request from GitHub, including
+ * comments in the authenticated user's current pending review.
+ *
+ * GitHub's PR-wide endpoint does not reliably expose pending-review comments,
+ * so GitHubClient fetches those through the review-scoped endpoint. Merge both
+ * snapshots by comment id because some GitHub-compatible hosts may already
+ * include pending rows in the PR-wide response.
+ *
+ * The capability check keeps the adapter compatible with older/custom client
+ * implementations. A supplemental-fetch failure rejects the sync so the route
+ * preserves the complete previous mirror instead of pruning cached draft rows
+ * from a partial snapshot.
  *
  * @param {Object} params
  * @param {Object} params.client - GitHubClient instance (injected)
@@ -136,7 +148,32 @@ function resolveCredentials(config, repository, _deps, options = {}) {
  * @returns {Promise<Array<Object>>} Raw Octokit review-comment objects
  */
 async function fetchComments({ client, owner, repo, pull_number }) {
-  return client.listReviewComments({ owner, repo, pull_number });
+  const request = { owner, repo, pull_number };
+  const submitted = await client.listReviewComments(request);
+  const allComments = Array.isArray(submitted) ? [...submitted] : [];
+
+  if (typeof client.listPendingReviewComments !== 'function') {
+    return submitted;
+  }
+
+  const pending = await client.listPendingReviewComments(request);
+
+  const seenIds = new Set(
+    allComments
+      .filter((comment) => comment && comment.id !== undefined && comment.id !== null)
+      .map((comment) => String(comment.id))
+  );
+
+  for (const comment of pending || []) {
+    const id = comment && comment.id !== undefined && comment.id !== null
+      ? String(comment.id)
+      : null;
+    if (id !== null && seenIds.has(id)) continue;
+    allComments.push(comment);
+    if (id !== null) seenIds.add(id);
+  }
+
+  return allComments;
 }
 
 /**

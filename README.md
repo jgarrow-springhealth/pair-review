@@ -982,7 +982,7 @@ Markdown files (`.md`, `.markdown`) get a per-file **Diff | Rendered** toggle in
 
 ### GitHub Review Comments
 
-When reviewing a PR, pair-review fetches existing inline review comments from GitHub and shows them in the diff alongside AI suggestions (orange) and your own draft comments (purple). External comments render as read-only blue-themed bubbles, with threads preserved (root plus replies). Each comment and each thread has a "Chat about this" button that opens the AI chat panel with the comment as context, so you can quickly ask the agent to investigate, explain, or draft a response.
+When reviewing a PR, pair-review fetches existing inline review comments from GitHub — including comments in your current pending GitHub review — and shows them in the diff alongside AI suggestions (orange) and your own pair-review draft comments (purple). External comments render as read-only blue-themed bubbles, with threads preserved (root plus replies). Each comment and each thread has a "Chat about this" button that opens the AI chat panel with the comment as context, so you can quickly ask the agent to investigate, explain, or draft a response.
 
 Sync runs automatically when the PR page loads (non-blocking) and on demand via a refresh button — there's no need to reload the page to pick up new comments.
 

@@ -32,6 +32,67 @@ describe('github-adapter', () => {
       });
       expect(result).toBe(rows);
     });
+
+    it('includes comments from the authenticated user pending review', async () => {
+      const submitted = [{ id: 1, body: 'submitted' }];
+      const pending = [{ id: 2, body: 'draft' }];
+      const client = {
+        listReviewComments: vi.fn().mockResolvedValue(submitted),
+        listPendingReviewComments: vi.fn().mockResolvedValue(pending),
+      };
+
+      const result = await githubAdapter.fetchComments({
+        client,
+        owner: 'octocat',
+        repo: 'hello-world',
+        pull_number: 42,
+      });
+
+      expect(client.listPendingReviewComments).toHaveBeenCalledWith({
+        owner: 'octocat',
+        repo: 'hello-world',
+        pull_number: 42,
+      });
+      expect(result).toEqual([...submitted, ...pending]);
+    });
+
+    it('deduplicates pending comments already returned by the PR-wide endpoint', async () => {
+      const submitted = [{ id: 1 }, { id: 2, body: 'wide response wins' }];
+      const client = {
+        listReviewComments: vi.fn().mockResolvedValue(submitted),
+        listPendingReviewComments: vi.fn().mockResolvedValue([
+          { id: 2, body: 'duplicate' },
+          { id: 3, body: 'draft' },
+        ]),
+      };
+
+      const result = await githubAdapter.fetchComments({
+        client,
+        owner: 'octocat',
+        repo: 'hello-world',
+        pull_number: 42,
+      });
+
+      expect(result).toEqual([
+        { id: 1 },
+        { id: 2, body: 'wide response wins' },
+        { id: 3, body: 'draft' },
+      ]);
+    });
+
+    it('rejects a partial snapshot when the supplemental draft fetch fails', async () => {
+      const client = {
+        listReviewComments: vi.fn().mockResolvedValue([{ id: 1 }]),
+        listPendingReviewComments: vi.fn().mockRejectedValue(new Error('draft endpoint unavailable')),
+      };
+
+      await expect(githubAdapter.fetchComments({
+        client,
+        owner: 'octocat',
+        repo: 'hello-world',
+        pull_number: 42,
+      })).rejects.toThrow('draft endpoint unavailable');
+    });
   });
 
   describe('credentialEnvVar', () => {
