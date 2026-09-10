@@ -19,6 +19,14 @@ const { TIERS, TIER_ALIASES } = require('./prompts/config');
 // Directory containing bin scripts (git-diff-lines, etc.)
 const BIN_DIR = path.join(__dirname, '..', '..', 'bin');
 
+// Timeout for the LLM JSON-extraction fallback. Generous on purpose: this
+// fallback is the last line of defense before a completed analysis is thrown
+// away, and thorough-tier responses can exceed 100KB — a slow reformat beats
+// losing the results (eval 2026-08-18: a 60s cap timed out on a 110KB
+// consolidation). Providers whose extraction CLI self-terminates (agy
+// --print-timeout) budget just under this value so their own error wins.
+const LLM_EXTRACTION_TIMEOUT_MS = 300000;
+
 /**
  * Quote shell-sensitive arguments for safe shell execution.
  * Any arg containing characters that could be interpreted by the shell
@@ -299,7 +307,7 @@ ${rawResponse}
       let stdout = '';
       let stderr = '';
       let settled = false;
-      const timeout = 60000; // 60 second timeout for extraction
+      const timeout = LLM_EXTRACTION_TIMEOUT_MS;
 
       // Detaching is centralized here so it ALWAYS runs when this call returns,
       // including via the timeout path that settles before the child exits.
@@ -496,6 +504,20 @@ function normalizeTier(tier) {
 /**
  * Infer default values for a model definition
  * Fills in missing optional fields based on id and tier
+ *
+ * A model definition (built-in or `providers.<id>.models` entry) may carry:
+ * - `id` (required) — canonical, config/URL-safe slug
+ * - `tier` (required) — fast | balanced | thorough | premium (aliases normalized here)
+ * - `aliases` — alternate selectors that resolve to this model
+ * - `name` / `tagline` / `description` / `badge` / `badgeClass` — picker display metadata
+ * - `cli_model` — exact `--model` string; `null` suppresses the flag (see
+ *   {@link resolveCliModelConfig})
+ * - `extra_args` / `env` — extra CLI flags and environment for this model
+ * - `supports_chat` — defaults to true when absent. Set `false` for an analysis-only
+ *   entry (e.g. a pseudo-model whose `extra_args` load a review skill): it stays in the
+ *   analysis catalog but is hidden from the chat model picker, and a chat selector
+ *   naming it degrades to the provider default. See `src/chat/chat-models.js`.
+ *
  * @param {Object} model - Model definition with at least id and tier
  * @returns {Object} - Model definition with inferred defaults
  * @throws {Error} If tier is missing or invalid
@@ -527,6 +549,41 @@ function inferModelDefaults(model) {
     badge: model.badge || tierInfo.badge,
     badgeClass: model.badgeClass || tierInfo.badgeClass
   };
+}
+
+/**
+ * Resolve the CLI model string for a model, given its built-in definition and the
+ * matching per-model config override.
+ *
+ * This is the single `cli_model` precedence ladder shared by every provider that
+ * decouples the app-level model id from the CLI `--model` argument (Claude, Codex,
+ * Pi/OMP, and the chat resolver in `src/chat/chat-models.js`). It deliberately tests
+ * `!== undefined` rather than truthiness so the two meaningful non-string values
+ * survive:
+ * - `undefined` (absent): fall through to the next rung.
+ * - `null`: explicitly suppress the model flag — the provider uses its own default.
+ * - `''`: passes through so the CLI surfaces its own error rather than us guessing.
+ *
+ * Precedence: per-model config override > built-in definition > the model id itself.
+ *
+ * Note: `mergeModels` replaces a matched built-in *wholesale*, so a partial config
+ * override (e.g. `{ id, tier, name }`) erases `cli_model`/`env`/`extra_args` on the
+ * merged entry. Runtime resolution must therefore always run this ladder against the
+ * SEPARATE built-in and config-override definitions, never against a merged entry.
+ *
+ * @param {Object|null|undefined} builtIn - Built-in model definition, if any
+ * @param {Object|null|undefined} configModel - Matching `providers.<id>.models` entry, if any
+ * @param {string} modelId - Model id to fall back to
+ * @returns {string|null} CLI model string, or null when the model flag is suppressed
+ */
+function resolveCliModelConfig(builtIn, configModel, modelId) {
+  if (configModel?.cli_model !== undefined) {
+    return configModel.cli_model;
+  }
+  if (builtIn?.cli_model !== undefined) {
+    return builtIn.cli_model;
+  }
+  return modelId;
 }
 
 /**
@@ -1116,6 +1173,7 @@ function getTierForModel(providerId, modelId) {
 
 module.exports = {
   AIProvider,
+  LLM_EXTRACTION_TIMEOUT_MS,
   MODEL_TIERS,
   quoteShellArgs,
   registerProvider,
@@ -1134,6 +1192,7 @@ module.exports = {
   getProviderConfigOverrides,
   inferModelDefaults,
   resolveDefaultModel,
+  resolveCliModelConfig,
   modelMatches,
   mergeModels,
   applyModelOverrides,
