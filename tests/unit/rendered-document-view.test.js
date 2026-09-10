@@ -177,6 +177,75 @@ describe('RenderedDocumentView', () => {
     });
   });
 
+  describe('AI review suggestions', () => {
+    function buildSuggestionCard(suggestion) {
+      const card = document.createElement('div');
+      card.className = 'ai-suggestion';
+      card.innerHTML = `
+        <div class="ai-suggestion-header">
+          <div class="ai-suggestion-header-left"><span class="ai-title"></span></div>
+        </div>
+        <div class="ai-suggestion-body"></div>
+      `;
+      card.querySelector('.ai-title').textContent = suggestion.title;
+      card.querySelector('.ai-suggestion-body').textContent = suggestion.body;
+      return card;
+    }
+
+    it('places AI findings with their source block and shows their line range', () => {
+      const view = makeView({
+        source: '# Title\n\nParagraph A\n',
+        callbacks: { onBuildSuggestionCard: buildSuggestionCard }
+      });
+      view.render();
+      view.setSuggestions([{
+        id: 71,
+        file: 'docs/guide.md',
+        line_start: 3,
+        line_end: 3,
+        title: 'AI found an issue',
+        body: 'Check this paragraph.'
+      }]);
+
+      const placement = view.container.querySelector(
+        '.rendered-markdown-block[data-start-line="3"] .rendered-markdown-suggestion-card'
+      );
+      expect(placement.dataset.renderedSuggestionId).toBe('71');
+      expect(placement.querySelector('.ai-title').textContent).toBe('AI found an issue');
+      expect(placement.querySelector('.ai-suggestion-body').textContent).toBe('Check this paragraph.');
+      expect(placement.querySelector('.rendered-markdown-suggestion-line-info').textContent).toBe('Line 3');
+    });
+
+    it('replaces stale suggestions and keeps gap visibility in sync', () => {
+      const view = makeView({
+        source: '# Title\n\nParagraph A\n',
+        callbacks: { onBuildSuggestionCard: buildSuggestionCard }
+      });
+      view.render();
+      view.setSuggestions([{ id: 72, line_start: 2, title: 'Gap finding', body: 'Gap body' }]);
+
+      const gap = view.container.querySelector('.rendered-markdown-gap[data-start-line="2"]');
+      expect(gap.hidden).toBe(false);
+      expect(gap.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(1);
+
+      view.setSuggestions([]);
+      expect(gap.hidden).toBe(true);
+      expect(view.container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(0);
+    });
+
+    it('is idempotent when the same suggestion is added twice', () => {
+      const view = makeView({
+        source: 'Paragraph A\n',
+        callbacks: { onBuildSuggestionCard: buildSuggestionCard }
+      });
+      view.render();
+      const suggestion = { id: 73, line_start: 1, title: 'Once', body: 'Once' };
+      view.addSuggestion(suggestion);
+      view.addSuggestion(suggestion);
+      expect(view.container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(1);
+    });
+  });
+
   describe('block comments', () => {
     it('renders an "Add comment" button per block and opens a form on click', () => {
       const view = makeView({ source: 'Some paragraph.\n' });
@@ -1229,20 +1298,15 @@ describe('RenderedDocumentView', () => {
     const labelsOf = (view, selector) =>
       Array.from(view.container.querySelectorAll(selector)).map((el) => el.getAttribute('aria-label'));
 
-    it('renders a plain plus glyph — no filled-circle icon anywhere', () => {
+    it('reuses the Diff-gutter styled button and literal plus glyph', () => {
       const view = makeView({ source: SOURCE });
       view.render();
       const buttons = view.container.querySelectorAll('.rendered-markdown-add-comment-btn');
       expect(buttons.length).toBeGreaterThan(1);
       buttons.forEach((btn) => {
-        const svg = btn.querySelector('svg');
-        expect(svg).toBeTruthy();
-        // The retired icon was a filled disc: a single path starting with
-        // the circle "M8 0a8 8 0 100 16A8 8 0 008 0z" arc. The plus is a
-        // simple cross outline with no arc commands at all.
-        const d = svg.querySelector('path').getAttribute('d');
-        expect(d).not.toMatch(/[aA]\s*8\s+8/);
-        expect(svg.getAttribute('aria-hidden')).toBe('true');
+        expect(btn.classList.contains('add-comment-btn')).toBe(true);
+        expect(btn.textContent).toBe('+');
+        expect(btn.querySelector('svg')).toBeNull();
       });
     });
 
@@ -1317,13 +1381,47 @@ describe('RenderedDocumentView', () => {
       view.render();
       const list = view.container.querySelector('ul');
       expect(labelsOf(view, 'li > .rendered-markdown-target-affordance > .rendered-markdown-target-btn')).toEqual([
-        'Add comment on Nested list item, line 4',
         'Add comment on List item, lines 3–4',
+        'Add comment on Nested list item, line 4',
         'Add comment on List item, line 5'
       ]);
       // Only <li> may be a child of <ul>/<ol>: the affordance goes INSIDE
-      // the item, never between items.
-      Array.from(list.children).forEach((child) => expect(child.tagName).toBe('LI'));
+      // the item, never between items, and leads the item's content.
+      Array.from(list.children).forEach((child) => {
+        expect(child.tagName).toBe('LI');
+        expect(child.firstElementChild.classList.contains('rendered-markdown-target-affordance')).toBe(true);
+      });
+    });
+
+    it('adds matching chat actions and passes exact block/nested line context', () => {
+      const targets = [];
+      const view = makeView({
+        source: SOURCE,
+        callbacks: { onChatTarget: (target) => targets.push(target) }
+      });
+      view.render();
+
+      const commentButtons = view.container.querySelectorAll('.rendered-markdown-add-comment-btn');
+      const chatButtons = view.container.querySelectorAll('.rendered-markdown-chat-btn');
+      expect(chatButtons).toHaveLength(commentButtons.length);
+      chatButtons.forEach((btn) => {
+        expect(btn.classList.contains('chat-line-btn')).toBe(true);
+        expect(btn.classList.contains('ai-action-chat')).toBe(true);
+        expect(btn.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+      });
+
+      view.container.querySelector('.rendered-markdown-block-chat-btn').click();
+      view.container.querySelector(
+        'li > .rendered-markdown-target-affordance > .rendered-markdown-target-chat-btn'
+      ).click();
+
+      expect(targets[0]).toEqual({
+        file: 'docs/guide.md', line_start: 1, line_end: 1, side: 'RIGHT', rendered_anchor: null
+      });
+      expect(targets[1]).toMatchObject({
+        file: 'docs/guide.md', line_start: 3, line_end: 4, side: 'RIGHT',
+        rendered_anchor: { v: 1, kind: 'list-item', startLine: 3, endLine: 4, ordinal: 0 }
+      });
     });
 
     it('adds row/header-cell/data-cell affordances without ever putting invalid children in the table', () => {
@@ -1349,14 +1447,17 @@ describe('RenderedDocumentView', () => {
       table.querySelectorAll('tr').forEach((row) => {
         Array.from(row.children).forEach((cell) => expect(['TH', 'TD']).toContain(cell.tagName));
       });
-      // The row affordance lives in a real trailing cell, one per row.
+      // The row affordance lives in a real leading cell, one per row.
       expect(table.querySelectorAll('tr > td.rendered-markdown-row-gutter')).toHaveLength(2);
+      table.querySelectorAll('tr.rendered-markdown-target').forEach((row) => {
+        expect(row.firstElementChild.classList.contains('rendered-markdown-row-gutter')).toBe(true);
+      });
     });
 
     it('marks the row gutter cell presentational while keeping its button reachable', () => {
       // The gutter is UI chrome, not data: without `role="presentation"`
       // every row reports one more column than the header describes, so AT
-      // announces a header-less trailing column on every row. The button
+      // announces a header-less leading column on every row. The buttons
       // inside must stay a real, named, focusable button — presentation is
       // not inherited by focusable descendants, and `aria-hidden` here
       // would have made the row target unreachable for screen-reader users.
@@ -1372,7 +1473,10 @@ describe('RenderedDocumentView', () => {
         expect(gutter.hasAttribute('aria-hidden')).toBe(false);
         expect(gutter.closest('[aria-hidden="true"]')).toBeNull();
 
+        const chatButton = gutter.querySelector('.rendered-markdown-target-chat-btn');
         const button = gutter.querySelector('.rendered-markdown-target-btn');
+        expect(chatButton.tagName).toBe('BUTTON');
+        expect(chatButton.getAttribute('aria-label')).toMatch(/^Chat about Table row, line \d+$/);
         expect(button.tagName).toBe('BUTTON');
         expect(button.getAttribute('role')).toBeNull(); // implicit button role
         expect(button.getAttribute('aria-label')).toMatch(/^Add comment on Table row, line \d+$/);
@@ -1556,6 +1660,47 @@ describe('RenderedDocumentView', () => {
       expect(view.container.querySelector('.rendered-markdown-comment-textarea').value).toBe('draft text');
     });
 
+    it('places list-item feedback directly after that item text and before any nested list', () => {
+      const view = makeView({ source: SOURCE });
+      view.render();
+      view.setComments([{
+        id: 99,
+        line_start: 3,
+        line_end: 4,
+        body: 'parent item feedback',
+        rendered_anchor: { v: 1, kind: 'list-item', startLine: 3, endLine: 4, ordinal: 0 }
+      }]);
+
+      const parentItem = view.container.querySelector('ul > li');
+      const card = parentItem.querySelector(':scope > .rendered-markdown-target-comments-list > .rendered-markdown-comment-card');
+      const childList = parentItem.querySelector(':scope > ul');
+      expect(card).toBeTruthy();
+      expect(card.dataset.renderedTargetKey).toBe('list-item|3|4|0');
+      expect(parentItem.querySelector(':scope > .rendered-markdown-target-comments-list').nextElementSibling)
+        .toBe(childList);
+      expect(view._commentListElements.get(1).contains(card)).toBe(false);
+    });
+
+    it('places row and cell feedback in a companion row immediately after the annotated table row', () => {
+      const view = makeView({ source: SOURCE });
+      view.render();
+      view.setComments([
+        { id: 97, line_start: 9, body: 'row', rendered_anchor: { v: 1, kind: 'table-row', startLine: 9, endLine: 9, ordinal: 0 } },
+        { id: 98, line_start: 9, body: 'cell', rendered_anchor: CELL_2 }
+      ]);
+
+      const sourceRow = view.container.querySelector('tbody tr.rendered-markdown-target');
+      const feedbackRow = sourceRow.nextElementSibling;
+      expect(feedbackRow.classList.contains('rendered-markdown-table-feedback-row')).toBe(true);
+      expect(feedbackRow.hidden).toBe(false);
+      expect(feedbackRow.querySelectorAll('.rendered-markdown-comment-card')).toHaveLength(2);
+      expect(feedbackRow.querySelector('[data-comment-id="97"]').dataset.renderedTargetKey)
+        .toBe('table-row|9|9|0');
+      expect(feedbackRow.querySelector('[data-comment-id="98"]').dataset.renderedTargetKey)
+        .toBe('table-cell|9|9|1');
+      expect(view._commentListElements.get(2).querySelector('.rendered-markdown-comment-card')).toBeNull();
+    });
+
     it('restores two comments on two cells of ONE source line to their own cells after a reload', () => {
       // Exactly the state the API returns after a reload: line numbers are
       // identical, only the (JSON-string) descriptors differ.
@@ -1627,6 +1772,50 @@ describe('RenderedDocumentView', () => {
       view.setComments([{ id: 6, line_start: 9, body: 'x', rendered_anchor: CELL_1 }]);
       view.removeComment(6);
       expect(view.container.querySelectorAll('.rendered-markdown-target-badge:not([hidden])')).toHaveLength(0);
+    });
+
+    it('keeps an adopted AI comment beside its unambiguous list item or table row', () => {
+      const view = makeView({ source: SOURCE });
+      view.render();
+      view.setComments([
+        { id: 8, parent_id: 80, line_start: 4, line_end: 4, body: 'accepted nested finding' },
+        { id: 9, parent_id: 90, line_start: 9, line_end: 9, body: 'accepted table finding' }
+      ]);
+
+      const nestedItem = view.container.querySelector('ul ul > li');
+      const nestedCard = view.container.querySelector('[data-comment-id="8"]');
+      expect(nestedCard.closest('li')).toBe(nestedItem);
+      expect(nestedCard.dataset.renderedTargetKey).toBe('nested-list-item|4|4|0');
+      expect(nestedCard.querySelector('.rendered-markdown-comment-target').textContent)
+        .toBe('Nested list item, line 4');
+
+      const tableRow = view.container.querySelector('tbody tr.rendered-markdown-target');
+      const tableCard = view.container.querySelector('[data-comment-id="9"]');
+      expect(tableCard.closest('.rendered-markdown-table-feedback-row'))
+        .toBe(tableRow.nextElementSibling);
+      expect(tableCard.dataset.renderedTargetKey).toBe('table-row|9|9|0');
+      expect(tableCard.dataset.renderedTargetKey).not.toContain('table-cell');
+    });
+
+    it('places an active AI finding beside the same unambiguous nested line used after adoption', () => {
+      const view = makeView({
+        source: SOURCE,
+        callbacks: {
+          onBuildSuggestionCard: (suggestion) => {
+            const card = document.createElement('div');
+            card.className = 'ai-suggestion';
+            card.dataset.suggestionId = String(suggestion.id);
+            return card;
+          }
+        }
+      });
+      view.render();
+      view.setSuggestions([{ id: 70, line_start: 4, line_end: 4, title: 'nested finding' }]);
+
+      const placement = view.container.querySelector('.rendered-markdown-suggestion-card');
+      expect(placement.closest('li')).toBe(view.container.querySelector('ul ul > li'));
+      expect(placement.parentElement.dataset.renderedTargetKey)
+        .toBe('nested-list-item|4|4|0');
     });
 
     it('a legacy comment with NO descriptor keeps its established top-level block placement', () => {

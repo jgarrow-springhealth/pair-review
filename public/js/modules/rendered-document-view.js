@@ -5,8 +5,8 @@
  *
  * Consumes the pure parsing/outline/target-resolution helpers from
  * `rendered-markdown.js` and builds the actual DOM: one wrapper `<div>` per
- * top-level markdown block, a per-block comment zone, heading ids for the
- * Outline sidebar, and click-interception for safe relative links to other
+ * top-level markdown block, block- and nested-target feedback zones, heading
+ * ids for the Outline sidebar, and click-interception for safe relative links to other
  * changed Markdown files.
  *
  * SECURITY NOTE: every block's inner HTML goes through the SAME
@@ -57,13 +57,11 @@
     );
   }
 
-  // Plain plus glyph. Deliberately NOT the filled-circle "plus in a disc"
-  // icon this view first shipped with: a filled dark circle reads as a
-  // status dot / avatar placeholder rather than an action, and gave no hint
-  // that the control adds a comment. `aria-hidden` because every button
-  // that embeds it carries its own descriptive `aria-label`.
-  const ADD_COMMENT_ICON_SVG = `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false" fill="currentColor">
-    <path d="M7.25 1.75a.75.75 0 0 1 1.5 0V7.25h5.5a.75.75 0 0 1 0 1.5H8.75v5.5a.75.75 0 0 1-1.5 0V8.75h-5.5a.75.75 0 0 1 0-1.5h5.5V1.75Z"/>
+  // Same chat glyph used by the Diff-line gutter. The adjacent comment
+  // control uses the same literal "+" and shared `.add-comment-btn` class as
+  // Diff mode, so the two views present one consistent action vocabulary.
+  const CHAT_ICON_SVG = `<svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14" aria-hidden="true" focusable="false">
+    <path d="M1.75 1h8.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 10.25 10H7.061l-2.574 2.573A1.458 1.458 0 0 1 2 11.543V10h-.25A1.75 1.75 0 0 1 0 8.25v-5.5C0 1.784.784 1 1.75 1ZM1.5 2.75v5.5c0 .138.112.25.25.25h1a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h3.5a.25.25 0 0 0 .25-.25v-5.5a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25Zm13 2a.25.25 0 0 0-.25-.25h-.5a.75.75 0 0 1 0-1.5h.5c.966 0 1.75.784 1.75 1.75v5.5A1.75 1.75 0 0 1 14.25 12H14v1.543a1.458 1.458 0 0 1-2.487 1.03L9.22 12.28a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l2.22 2.22v-2.19a.75.75 0 0 1 .75-.75h1a.25.25 0 0 0 .25-.25Z"/>
   </svg>`;
 
   /**
@@ -216,6 +214,10 @@
      * @param {function(object):Promise<object>} [opts.callbacks.onCreateComment] - resolves to the saved comment ({id,...})
      * @param {function(number,string):Promise<void>} [opts.callbacks.onEditComment]
      * @param {function(number):Promise<void>} [opts.callbacks.onDeleteComment]
+     * @param {function(object):void} [opts.callbacks.onChatTarget] - opens chat
+     *   with `{file,line_start,line_end,side,rendered_anchor}` context
+     * @param {function(object):HTMLElement} [opts.callbacks.onBuildSuggestionCard]
+     *   builds the established AI-suggestion card for a line-level finding
      * @param {function():void} [opts.callbacks.onCommentsChanged] - called AFTER
      *   this view adds/removes a comment card in response to a UI action, so
      *   a host whose comment count is DOM-derived can recount once the DOM
@@ -292,6 +294,12 @@
       // lookup. A Map keyed on the element object means an injected element
       // cannot impersonate a target however it is marked up.
       this._targetsByElement = new Map();
+      // Table comments cannot live directly under <tr>. Each source row gets
+      // one adjacent, normally-hidden feedback row containing a separate list
+      // for the row and for each cell. Keeping the rows in an iterable Set
+      // lets comment/form lifecycle changes collapse empty feedback rows.
+      this._tableFeedbackByRow = new Map();
+      this._tableFeedbackRows = new Set();
       // The single target whose affordance is currently revealed. Exactly
       // one at a time: hovering a nested item inside a list item (or a cell
       // inside a row) reveals the INNERMOST target's plus only, so the
@@ -320,6 +328,8 @@
       this._gapListElements = new Map();
       this._targetsByKey = new Map();
       this._targetsByElement = new Map();
+      this._tableFeedbackByRow = new Map();
+      this._tableFeedbackRows = new Set();
       // A fresh document gets a fresh nested-target budget: this render
       // replaces the container's contents outright, so every button and
       // listener the previous pass created is gone with it.
@@ -457,8 +467,8 @@
       this._commentListElements.set(block.index, commentZone.list);
       this._blockElements.set(block.index, wrapper);
 
-      // Nested targets are wired AFTER the block's comment zone exists —
-      // their click handlers resolve that zone's list by block index.
+      // Nested targets are wired after the block zone exists, but each one
+      // creates its own nearby feedback list rather than sharing that zone.
       this._wireNestedTargets(block, content);
       return wrapper;
     }
@@ -573,11 +583,13 @@
      * Attach one nested target's affordance (plus button + comment-count
      * badge) to its DOM element and register the trusted descriptor record.
      *
-     * DOM VALIDITY. A `<tr>` may only contain `<td>`/`<th>`, so a row's
-     * affordance goes into a dedicated trailing gutter cell rather than
-     * being injected straight under the row — nothing is ever added
-     * directly under `table`, `tr`, `ul` or `ol`. List items and cells
-     * accept flow content, so their affordance is appended in place.
+     * DOM VALIDITY AND FEEDBACK PLACEMENT. A `<tr>` may only contain
+     * `<td>`/`<th>`, so row controls use a dedicated leading gutter cell and
+     * row/cell forms and cards use a companion feedback row immediately
+     * after the source row. List-item feedback is valid flow content inside
+     * its own `<li>` and is inserted before any child list. Thus nested
+     * feedback stays beside the content it annotates instead of collecting
+     * at the end of the whole list/table.
      * @param {object} block
      * @param {object} anchor - descriptor from buildNestedTargets
      * @param {HTMLElement} element
@@ -608,40 +620,99 @@
       badge.setAttribute('aria-hidden', 'true');
       affordance.appendChild(badge);
 
+      const chatButton = document.createElement('button');
+      chatButton.type = 'button';
+      chatButton.className = 'chat-line-btn ai-action-chat rendered-markdown-chat-btn rendered-markdown-target-chat-btn';
+      chatButton.title = `Chat about ${description}`;
+      chatButton.setAttribute('aria-label', `Chat about ${description}`);
+      chatButton.innerHTML = CHAT_ICON_SVG;
+
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'rendered-markdown-add-comment-btn rendered-markdown-target-btn';
+      button.className = 'add-comment-btn rendered-markdown-add-comment-btn rendered-markdown-target-btn';
       button.title = `Add comment on ${description}`;
       button.setAttribute('aria-label', `Add comment on ${description}`);
-      button.innerHTML = ADD_COMMENT_ICON_SVG;
-      const record = { anchor, key, description, blockIndex: block.index, element, badge, button };
+      button.textContent = '+';
+      const record = {
+        anchor, key, description, blockIndex: block.index, element, badge, button, chatButton,
+        list: null, feedbackWrapper: null
+      };
+      chatButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this._chatAboutTarget(block, record);
+      });
       button.addEventListener('click', (event) => {
         event.stopPropagation();
-        const list = this._commentListElements.get(block.index);
-        if (!list) return;
-        this._showCommentForm(block, list, button, record);
+        if (!record.list) return;
+        this._showCommentForm(block, record.list, button, record);
       });
+      affordance.appendChild(chatButton);
       affordance.appendChild(button);
 
       element.classList.add('rendered-markdown-target');
+      // Assigned only after sanitization from this trusted descriptor. The
+      // sidebar navigation path uses it to scroll to the annotated CONTENT,
+      // not merely to a card below it.
+      element.dataset.renderedTargetKey = key;
+      element.dataset.renderedTargetKind = anchor.kind;
+      element.dataset.renderedStartLine = String(anchor.startLine);
+      element.dataset.renderedEndLine = String(anchor.endLine);
       if (tag === 'tr') {
         const gutter = document.createElement('td');
         gutter.className = 'rendered-markdown-row-gutter';
         // ACCESSIBILITY: this cell is pure UI chrome, not table data. Left
         // as a real `td` it would make every row report one more column
-        // than the header describes, so AT announces a header-less trailing
-        // column on every single row. `role="presentation"` removes the
-        // CELL from the table's structure while leaving its contents in the
-        // accessibility tree — presentation is NOT inherited by focusable
-        // descendants, so the add-comment button keeps its own button role,
-        // its `aria-label` and its tab stop. (`aria-hidden` would be wrong
-        // here: it would hide the button itself, making the row target
-        // unreachable for screen-reader users.)
+        // than the header describes. Presentation removes the CELL from the
+        // table structure but is not inherited by the focusable controls.
         gutter.setAttribute('role', 'presentation');
         gutter.appendChild(affordance);
-        element.appendChild(gutter);
+        element.insertBefore(gutter, element.firstChild);
       } else {
-        element.appendChild(affordance);
+        // The affordance is the first child for list items and cells, so its
+        // position is stable and never jumps to the end of the content.
+        element.insertBefore(affordance, element.firstChild);
+      }
+
+      const list = document.createElement('div');
+      list.className = 'rendered-markdown-comments-list rendered-markdown-target-comments-list';
+      list.dataset.renderedTargetKey = key;
+      record.list = list;
+
+      if (tag === 'li') {
+        // A parent item's feedback belongs after its own text but BEFORE its
+        // nested list, otherwise it can end up many children away from the
+        // line being discussed.
+        const childList = Array.from(element.children).find(
+          (child) => child.tagName === 'UL' || child.tagName === 'OL'
+        );
+        element.insertBefore(list, childList || null);
+        record.feedbackWrapper = list;
+      } else {
+        // Row and cell cards share one valid companion <tr>, while retaining
+        // separate target lists so cell identity and badges cannot blur.
+        const sourceRow = tag === 'tr' ? element : element.closest('tr');
+        if (!sourceRow) return false;
+        let feedback = this._tableFeedbackByRow.get(sourceRow);
+        if (!feedback) {
+          const row = document.createElement('tr');
+          row.className = 'rendered-markdown-table-feedback-row';
+          row.hidden = true;
+          const cell = document.createElement('td');
+          cell.className = 'rendered-markdown-table-feedback-cell';
+          cell.colSpan = Math.max(1, sourceRow.children.length);
+          cell.setAttribute('role', 'presentation');
+          row.appendChild(cell);
+          sourceRow.insertAdjacentElement('afterend', row);
+          feedback = { row, cell };
+          this._tableFeedbackByRow.set(sourceRow, feedback);
+          this._tableFeedbackRows.add(row);
+        } else {
+          // The row gutter may have been attached after an earlier cell in a
+          // defensive/non-standard descriptor order.
+          feedback.cell.colSpan = Math.max(1, sourceRow.children.length);
+        }
+        feedback.cell.appendChild(list);
+        record.feedbackWrapper = feedback.row;
       }
 
       this._targetsByKey.set(key, record);
@@ -853,15 +924,29 @@
       list.className = 'rendered-markdown-comments-list';
       zone.appendChild(list);
 
+      const controls = document.createElement('div');
+      controls.className = 'rendered-markdown-target-controls rendered-markdown-block-controls';
+
+      const chatBtn = document.createElement('button');
+      chatBtn.type = 'button';
+      chatBtn.className = 'chat-line-btn ai-action-chat rendered-markdown-chat-btn rendered-markdown-block-chat-btn';
+      const chatLabel = this._blockTargetLabel(block, 'Chat about');
+      chatBtn.title = chatLabel;
+      chatBtn.setAttribute('aria-label', chatLabel);
+      chatBtn.innerHTML = CHAT_ICON_SVG;
+      chatBtn.addEventListener('click', () => this._chatAboutTarget(block, null));
+      controls.appendChild(chatBtn);
+
       const addBtn = document.createElement('button');
       addBtn.type = 'button';
-      addBtn.className = 'rendered-markdown-add-comment-btn rendered-markdown-block-btn';
+      addBtn.className = 'add-comment-btn rendered-markdown-add-comment-btn rendered-markdown-block-btn';
       const blockLabel = this._blockTargetLabel(block);
       addBtn.title = blockLabel;
       addBtn.setAttribute('aria-label', blockLabel);
-      addBtn.innerHTML = ADD_COMMENT_ICON_SVG;
+      addBtn.textContent = '+';
       addBtn.addEventListener('click', () => this._showCommentForm(block, list, addBtn, null));
-      zone.appendChild(addBtn);
+      controls.appendChild(addBtn);
+      zone.appendChild(controls);
 
       return { zone, list };
     }
@@ -882,25 +967,42 @@
      * @returns {string}
      * @private
      */
-    _blockTargetLabel(block) {
+    _blockTargetLabel(block, action = 'Add comment on') {
       const lines = block.endLine > block.startLine
         ? `lines ${block.startLine}-${block.endLine}`
         : `line ${block.startLine}`;
       const kind = BLOCK_TARGET_LABELS[block.type] || BLOCK_TARGET_FALLBACK_LABEL;
-      return `Add comment on ${kind}, ${lines}`;
+      return `${action} ${kind}, ${lines}`;
+    }
+
+    /**
+     * Open chat with the same line/range context that Diff-mode gutter chat
+     * supplies. Nested targets additionally pass their stable local anchor so
+     * callers can preserve the more precise item/cell identity in the future.
+     * @param {object} block
+     * @param {object|null} targetRecord
+     * @private
+     */
+    _chatAboutTarget(block, targetRecord) {
+      if (!this.callbacks.onChatTarget) return;
+      this.callbacks.onChatTarget({
+        file: this.filePath,
+        line_start: targetRecord ? targetRecord.anchor.startLine : block.startLine,
+        line_end: targetRecord ? targetRecord.anchor.endLine : block.endLine,
+        side: 'RIGHT',
+        rendered_anchor: targetRecord ? { ...targetRecord.anchor } : null
+      });
     }
 
     /**
      * Show the inline "new comment" form for a block or for one of its
      * nested targets.
      *
-     * Nested-target forms and cards live in the BLOCK's comment list, not
-     * inside the list item / row / cell itself: a comment card is flow
-     * content that cannot legally sit under `tr`, and dropping one into a
-     * table cell would also wreck the table's layout. The form and the
-     * resulting card instead name their exact target, and the target
-     * element itself carries a comment-count badge — see
-     * `_syncTargetBadges`.
+     * Nested-target forms and cards use the target's own nearby list. A list
+     * item's list is valid flow content inside that `<li>`; table row/cell
+     * lists live in a valid companion row immediately after the source row.
+     * The form/card names its exact target, and the target element also
+     * carries a compact comment-count badge — see `_syncTargetBadges`.
      * @param {object} block
      * @param {HTMLElement} list
      * @param {HTMLElement} [triggerEl] - the "Add comment" button that
@@ -913,18 +1015,20 @@
      */
     _showCommentForm(block, list, triggerEl, targetRecord) {
       const targetKey = targetRecord ? targetRecord.key : 'block';
-      const existing = list.querySelector('.rendered-markdown-comment-form');
+      // Target-specific lists mean the previously-open form may be elsewhere
+      // in this document. Keep the established one-form-at-a-time contract
+      // by searching the whole view, not only the destination list.
+      const existing = this.container.querySelector('.rendered-markdown-comment-form');
       if (existing) {
         // Same target: this is a repeat click — just return to the form.
-        // DIFFERENT target: the reviewer has changed their mind about what
-        // they are commenting on, so the open form is replaced rather than
-        // silently retargeted (which would attach their text to whichever
-        // element they clicked first).
+        // DIFFERENT target: the reviewer has changed their mind, so replace
+        // rather than silently retargeting their text.
         if (existing.dataset.targetKey === targetKey) {
           existing.querySelector('textarea')?.focus();
           return;
         }
         existing.remove();
+        this._syncTargetFeedbackVisibility();
       }
 
       const RM = getRenderedMarkdown();
@@ -950,6 +1054,7 @@
         </div>
       `;
       list.appendChild(form);
+      this._syncTargetFeedbackVisibility();
 
       const textarea = form.querySelector('textarea');
       const submitBtn = form.querySelector('.submit');
@@ -965,6 +1070,7 @@
       });
       const dismiss = () => {
         form.remove();
+        this._syncTargetFeedbackVisibility();
         triggerEl?.focus();
       };
       // Both entry paths funnel through the SAME call, and `_submitComment`
@@ -1028,6 +1134,7 @@
           body
         });
         form.remove();
+        this._syncTargetFeedbackVisibility();
         this.addComment(comment);
         this._notifyCommentsChanged();
       } catch (error) {
@@ -1068,12 +1175,12 @@
      *   0. `target` — the comment carries a VALID rendered anchor that still
      *      resolves to a nested target present in the current document (a
      *      list item, a table row, an exact cell). The card goes in that
-     *      target's block zone, labelled with the target, and the target
-     *      element itself gets a comment badge. This is the only case that
+     *      target's nearby feedback list, labelled with the target, and the
+     *      target element itself gets a comment badge. This is the only case that
      *      can tell two comments on two cells of one source line apart.
-     *   1. `block` — the line is inside a rendered top-level block. The
-     *      card goes in that block's comment zone (the normal case, and the
-     *      unchanged behavior for every comment predating nested anchors).
+     *   1. `block`/inferred target — adopted AI feedback with no persisted
+     *      nested descriptor uses an unambiguous list-item/table-row target;
+     *      every other line inside a rendered block uses that block's zone.
      *   2. `gap`   — the line is a real line of this file that renders as
      *      no block (a blank separator line, leading/trailing blank lines,
      *      a link-reference definition). The card goes in that gap's own
@@ -1106,17 +1213,14 @@
       if (anchor) {
         const key = RM.renderedAnchorKey(anchor);
         const record = this._targetsByKey.get(key);
-        if (record) {
-          const list = this._commentListElements.get(record.blockIndex);
-          if (list) {
-            return {
-              kind: 'target',
-              list,
-              wrapper: this._blockElements.get(record.blockIndex) || null,
-              targetKey: key,
-              targetLabel: record.description
-            };
-          }
+        if (record?.list) {
+          return {
+            kind: 'target',
+            list: record.list,
+            wrapper: record.feedbackWrapper || record.element,
+            targetKey: key,
+            targetLabel: record.description
+          };
         }
       }
       // Reaching here with a readable anchor means it did not resolve to a
@@ -1128,7 +1232,19 @@
       // wrong. State only what is actually known — the target the reviewer
       // picked can't be identified in the current content — and name the
       // honest line the comment came from.
-      const fallback = this._resolveLineContainer(comment ? comment.line_start : null);
+      // Adopted AI findings carry line coordinates but no nested descriptor.
+      // For those, use the narrowest UNAMBIGUOUS line target (list item or
+      // table row; never a cell, since all cells share one source line) so
+      // the accepted comment stays where its finding was discussed instead
+      // of dropping to the end of a long list/table block. Ordinary legacy
+      // and explicit whole-block comments preserve their established block
+      // placement. A valid-but-stale anchor also stays on its honest block/
+      // gap fallback rather than being guessed onto a sibling.
+      const preferNestedLineTarget = rawAnchor == null && comment?.parent_id != null;
+      const fallback = this._resolveLineContainer(
+        comment ? comment.line_start : null,
+        { preferNested: preferNestedLineTarget }
+      );
       if (anchor) {
         fallback.staleAnchor = anchor;
         fallback.targetLabel =
@@ -1144,12 +1260,28 @@
      * verbatim as its fallback, guaranteeing a stale anchor lands exactly
      * where the same comment would have landed with no anchor at all.
      * @param {*} rawLine - comment.line_start as stored
-     * @returns {{kind:string, list:HTMLElement|null, wrapper:HTMLElement|null}}
+     * @param {object} [opts]
+     * @param {boolean} [opts.preferNested] - place at an unambiguous list
+     *   item/table row when one contains this line
+     * @returns {{kind:string, list:HTMLElement|null, wrapper:HTMLElement|null,
+     *   targetKey?:string, targetLabel?:string}}
      * @private
      */
-    _resolveLineContainer(rawLine) {
+    _resolveLineContainer(rawLine, opts = {}) {
       const line = _toSourceLine(rawLine);
       if (line != null) {
+        if (opts.preferNested) {
+          const record = this._findUnambiguousLineTarget(line);
+          if (record?.list) {
+            return {
+              kind: 'target',
+              list: record.list,
+              wrapper: record.feedbackWrapper || record.element,
+              targetKey: record.key,
+              targetLabel: record.description
+            };
+          }
+        }
         const block = this.findBlockForLine(line);
         if (block) {
           const list = this._commentListElements.get(block.index);
@@ -1165,6 +1297,32 @@
     }
 
     /**
+     * Return the narrowest nested target that a source line identifies
+     * without guessing. List items own their mapped line range and a table
+     * row owns its source line; cells are deliberately excluded because a
+     * Markdown row gives every cell the same line coordinate.
+     * @param {number} line
+     * @returns {object|null}
+     * @private
+     */
+    _findUnambiguousLineTarget(line) {
+      const candidates = Array.from(this._targetsByKey.values())
+        .filter((record) => {
+          const { kind, startLine, endLine } = record.anchor;
+          return (kind === 'list-item' || kind === 'nested-list-item' || kind === 'table-row')
+            && startLine <= line && line <= endLine;
+        })
+        .sort((a, b) => {
+          const aSpan = a.anchor.endLine - a.anchor.startLine;
+          const bSpan = b.anchor.endLine - b.anchor.startLine;
+          if (aSpan !== bSpan) return aSpan - bSpan;
+          return Number(b.anchor.kind === 'nested-list-item')
+            - Number(a.anchor.kind === 'nested-list-item');
+        });
+      return candidates[0] || null;
+    }
+
+    /**
      * Every comment list in this document — block zones, gap containers,
      * and the orphan fallback zone.
      * @returns {HTMLElement[]}
@@ -1173,10 +1331,26 @@
     _allCommentLists() {
       const lists = [
         ...this._commentListElements.values(),
-        ...this._gapListElements.values()
+        ...this._gapListElements.values(),
+        ...Array.from(this._targetsByKey.values(), (record) => record.list).filter(Boolean)
       ];
       if (this._orphanList) lists.push(this._orphanList);
-      return lists;
+      return Array.from(new Set(lists));
+    }
+
+    /**
+     * Show a table's companion feedback row only while one of its row/cell
+     * lists contains a form, saved comment, or finding. List-item feedback
+     * needs no imperative state: its empty list is hidden by CSS.
+     * @private
+     */
+    _syncTargetFeedbackVisibility() {
+      for (const row of this._tableFeedbackRows) {
+        row.hidden = !row.querySelector(
+          '.rendered-markdown-comment-card, .rendered-markdown-comment-form, '
+          + '.rendered-markdown-suggestion-card'
+        );
+      }
     }
 
     /**
@@ -1190,7 +1364,9 @@
     _syncFallbackVisibility() {
       const sync = (wrapper, list) => {
         if (!wrapper || !list) return;
-        wrapper.hidden = list.querySelector('.rendered-markdown-comment-card') === null;
+        wrapper.hidden = list.querySelector(
+          '.rendered-markdown-comment-card, .rendered-markdown-suggestion-card'
+        ) === null;
       };
       for (const [index, wrapper] of this._gapElements) {
         sync(wrapper, this._gapListElements.get(index));
@@ -1212,7 +1388,77 @@
       }
       (comments || []).forEach((comment) => this.addComment(comment, { skipMissing: true, deferSync: true }));
       this._syncFallbackVisibility();
+      this._syncTargetFeedbackVisibility();
       this._syncTargetBadges();
+    }
+
+    /**
+     * Replace the AI-review findings displayed alongside the rendered
+     * document. The host owns card construction so this view reuses the
+     * established `.ai-suggestion` component rather than maintaining a
+     * second rendering of suggestion titles, categories, and Markdown.
+     *
+     * Only active, line-level, RIGHT-side suggestions for this file should
+     * be passed in. File-level findings remain in the existing file-comments
+     * zone above the document, and LEFT-side findings cannot be safely mapped
+     * onto the current/new file content.
+     * @param {Array<object>} suggestions
+     */
+    setSuggestions(suggestions) {
+      for (const list of this._allCommentLists()) {
+        list.querySelectorAll('.rendered-markdown-suggestion-card').forEach((el) => el.remove());
+      }
+      (suggestions || []).forEach((suggestion) => this.addSuggestion(suggestion));
+      this._syncFallbackVisibility();
+      this._syncTargetFeedbackVisibility();
+    }
+
+    /**
+     * Place one AI suggestion at its current-file source line. Suggestions do
+     * not carry rendered nested-target descriptors, but a line can still
+     * identify a list item or table row unambiguously. Cells are never inferred
+     * because every cell in a Markdown row shares that row's source line.
+     * @param {object} suggestion
+     */
+    addSuggestion(suggestion) {
+      if (!suggestion || !this.callbacks.onBuildSuggestionCard) return;
+      const id = suggestion.id == null ? '' : String(suggestion.id);
+      const duplicate = Array.from(
+        this.container.querySelectorAll('.rendered-markdown-suggestion-card')
+      ).some((el) => el.dataset.renderedSuggestionId === id);
+      if (id && duplicate) return;
+
+      const target = this._resolveLineContainer(
+        suggestion.line_start ?? suggestion.line_end,
+        { preferNested: true }
+      );
+      if (!target.list) return;
+      const suggestionCard = this.callbacks.onBuildSuggestionCard(suggestion);
+      if (!suggestionCard || suggestionCard.nodeType !== 1) return;
+
+      const placement = document.createElement('div');
+      placement.className = 'rendered-markdown-suggestion-card';
+      if (id) placement.dataset.renderedSuggestionId = id;
+
+      const headerLeft = suggestionCard.querySelector('.ai-suggestion-header-left');
+      if (headerLeft) {
+        const lineInfo = document.createElement('span');
+        lineInfo.className = 'rendered-markdown-suggestion-line-info';
+        lineInfo.textContent = this._formatLineRange(suggestion);
+        const title = headerLeft.querySelector('.ai-title');
+        headerLeft.insertBefore(lineInfo, title || null);
+      }
+
+      placement.appendChild(suggestionCard);
+      // Keep pending AI findings before saved reviewer comments regardless of
+      // whether this is the initial build or a later restore/status refresh.
+      const firstCommentOrForm = target.list.querySelector(
+        '.rendered-markdown-comment-card, .rendered-markdown-comment-form'
+      );
+      if (firstCommentOrForm) target.list.insertBefore(placement, firstCommentOrForm);
+      else target.list.appendChild(placement);
+
+      if (target.wrapper && target.kind !== 'block') target.wrapper.hidden = false;
     }
 
     /**
@@ -1263,6 +1509,7 @@
       if (target.wrapper && target.kind !== 'block' && target.kind !== 'target') {
         target.wrapper.hidden = false;
       }
+      this._syncTargetFeedbackVisibility();
       if (!opts.deferSync) this._syncTargetBadges();
     }
 
@@ -1289,6 +1536,7 @@
     removeComment(commentId) {
       this._findCommentCards(commentId).forEach((el) => el.remove());
       this._syncFallbackVisibility();
+      this._syncTargetFeedbackVisibility();
       this._syncTargetBadges();
     }
 
@@ -1296,11 +1544,10 @@
      * Refresh every nested target's comment-count badge from the cards
      * currently in the DOM.
      *
-     * The badge is what makes a nested comment visibly belong to its exact
-     * element: the card itself lives in the block's comment zone (a card
-     * cannot legally sit under a `tr`, and would destroy a table's layout
-     * inside a cell), so without the badge the cell/row/item would give no
-     * sign that it carries feedback. Counting from the DOM — rather than a
+     * The badge is the compact always-visible signal that a nested element
+     * carries feedback; the full card sits in that target's nearby list (or
+     * its source row's valid companion row for tables). Counting from the DOM
+     * — rather than a
      * parallel tally — means the badges cannot drift out of step with the
      * cards after any add/remove/refresh path.
      * @private
@@ -1625,6 +1872,7 @@
         // target's badge, which must not keep claiming a comment count the
         // reviewer just removed.
         this._syncFallbackVisibility();
+        this._syncTargetFeedbackVisibility();
         this._syncTargetBadges();
         this._notifyCommentsChanged();
       } catch (error) {

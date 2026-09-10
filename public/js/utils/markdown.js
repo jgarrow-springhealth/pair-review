@@ -37,7 +37,7 @@ const ALLOWED_TAGS = [
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'em', 'strong', 's', 'hr', 'br', 'span',
   'table', 'thead', 'tbody', 'tr', 'th', 'td',
-  'img',
+  'img', 'input',
   // GitHub-supported inline HTML subset
   'sub', 'sup', 'kbd', 'ins', 'del', 'mark',
   'details', 'summary', 'abbr'
@@ -46,7 +46,8 @@ const ALLOWED_TAGS = [
 const ALLOWED_ATTR = [
   'href', 'title', 'target', 'rel',
   'src', 'alt', 'align', 'class',
-  'start', 'colspan', 'rowspan'
+  'start', 'colspan', 'rowspan',
+  'type', 'checked', 'disabled'
 ];
 
 // Keep synchronous highlighting bounded. Rendered documents already have a
@@ -74,6 +75,49 @@ const HLJS_TOKEN_CLASSES = new Set([
 const HLJS_AUXILIARY_CLASSES = new Set([
   'class_', 'function_', 'inherited__', 'language_'
 ]);
+
+/**
+ * Add GitHub-style task-list checkboxes without requiring a browser-only
+ * markdown-it plugin. Only a checkbox marker at the start of a list item is
+ * converted; ordinary prose containing "[ ]" or "[x]" is left untouched.
+ *
+ * The custom token's renderer emits only fixed markup. The checked state is
+ * derived from the marker, never copied into an attribute value.
+ * @param {object} md - configured markdown-it instance
+ */
+function enableTaskListCheckboxes(md) {
+  md.core.ruler.after('inline', 'task_list_checkboxes', function (state) {
+    const tokens = state.tokens;
+
+    for (let i = 2; i < tokens.length; i++) {
+      const inline = tokens[i];
+      if (
+        inline.type !== 'inline' ||
+        tokens[i - 1].type !== 'paragraph_open' ||
+        tokens[i - 2].type !== 'list_item_open'
+      ) {
+        continue;
+      }
+
+      const firstChild = inline.children && inline.children[0];
+      if (!firstChild || firstChild.type !== 'text') continue;
+
+      const marker = firstChild.content.match(/^\[([ xX])\](?:[ \t]+|$)/);
+      if (!marker) continue;
+
+      firstChild.content = firstChild.content.slice(marker[0].length);
+      const checkbox = new state.Token('task_list_checkbox', 'input', 0);
+      checkbox.meta = { checked: marker[1].toLowerCase() === 'x' };
+      inline.children.unshift(checkbox);
+      tokens[i - 2].attrJoin('class', 'task-list-item');
+    }
+  });
+
+  md.renderer.rules.task_list_checkbox = function (tokens, idx) {
+    const checked = tokens[idx].meta && tokens[idx].meta.checked ? ' checked' : '';
+    return `<input type="checkbox" disabled${checked}> `;
+  };
+}
 
 /**
  * Configure a markdown-it instance with the project's rendering options.
@@ -104,6 +148,8 @@ function configureMarkdownIt(markdownit, opts = {}) {
       return highlightCode(highlighter, code, language);
     }
   });
+
+  enableTaskListCheckboxes(md);
 
   // Enable emoji shortcode support (e.g., :smile: -> 😄)
   if (opts.emoji) {
@@ -178,8 +224,8 @@ function highlightCode(highlighter, code, language) {
  * Removes HTML comments (default) and dangerous tags/attributes, converts
  * markdown-it's table-alignment inline style into the allowlisted `align`
  * attribute (so arbitrary inline styles never need to be permitted), forces
- * safe link attributes on anchors, and scopes `class` to markdown code
- * language hints only.
+ * safe link attributes on anchors, and scopes `class` to generated task-list
+ * markers and markdown code/highlighting classes only.
  * @param {object} purify - a configured DOMPurify instance
  * @param {string} html - HTML to sanitize
  * @returns {string} sanitized HTML
@@ -212,16 +258,25 @@ function sanitizeHtml(purify, html) {
       node.setAttribute('target', '_blank');
       node.setAttribute('rel', 'noopener noreferrer');
     }
-    // Scope `class` to expected markdown output. Code/pre may keep only a
-    // punctuation-safe language hint. A token span may keep `hljs-*` and the
-    // small set of theme modifiers above, but only when an `hljs-*` scope is
-    // present. This retains compound syntax scopes without admitting app or
-    // layout classes from repository-controlled raw HTML.
+    // Inputs are admitted only for rendered task-list markers. Keep every
+    // surviving input inert, including repository-authored raw HTML inputs.
+    if (tag === 'INPUT') {
+      node.setAttribute('type', 'checkbox');
+      node.setAttribute('disabled', '');
+    }
+    // Scope `class` to expected markdown output. Task list items may keep
+    // their exact marker class. Code/pre may keep only a punctuation-safe
+    // language hint. A token span may keep `hljs-*` and the small set of theme
+    // modifiers above, but only when an `hljs-*` scope is present. This keeps
+    // generated Markdown styling without admitting app or layout classes from
+    // repository-controlled raw HTML.
     if (node.hasAttribute('class')) {
       const classes = node.getAttribute('class').split(/\s+/);
       let kept = [];
       if (tag === 'CODE' || tag === 'PRE') {
         kept = classes.filter((c) => /^language-[\w+.#-]+$/.test(c));
+      } else if (tag === 'LI') {
+        kept = classes.filter((c) => c === 'task-list-item');
       } else if (tag === 'SPAN') {
         const hasHighlightScope = classes.some((c) => HLJS_TOKEN_CLASSES.has(c));
         if (hasHighlightScope) {

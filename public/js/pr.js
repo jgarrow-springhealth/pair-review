@@ -127,6 +127,9 @@ class PRManager {
     this.generatedFiles = new Map();
     // User comments storage
     this.userComments = [];
+    // AI-review suggestions currently selected by run/level. Kept separately
+    // from adopted suggestions, which become entries in userComments.
+    this.aiSuggestions = [];
     // Analysis config modal
     this.analysisConfigModal = null;
     // File collapse state - tracks which files are manually collapsed
@@ -4731,6 +4734,53 @@ class PRManager {
       && (comment.side || 'RIGHT') === 'RIGHT';
   }
 
+  /**
+   * Whether an AI-review suggestion can be placed against the Rendered
+   * document's NEW/current content. Adopted findings are represented by their
+   * resulting user comment; dismissed findings remain available in Diff and
+   * the AI panel but do not occupy the reading view.
+   * @param {object} suggestion
+   * @param {string} filePath
+   * @returns {boolean}
+   */
+  _isRenderableSuggestion(suggestion, filePath) {
+    const isFileLevel = suggestion?.is_file_level === 1 || suggestion?.is_file_level === true;
+    const hasLine = suggestion?.line_start != null || suggestion?.line_end != null;
+    return suggestion?.file === filePath
+      && !isFileLevel
+      && hasLine
+      && suggestion.status !== 'dismissed'
+      && suggestion.status !== 'adopted'
+      && (suggestion.side || 'RIGHT') === 'RIGHT';
+  }
+
+  /**
+   * Build the established AI suggestion card for placement in a Rendered
+   * document. SuggestionManager remains the single card renderer. Adopt,
+   * dismiss, and chat work from either surface; only edit-and-adopt is removed
+   * because its form is anchored to a Diff row. Adoption immediately replaces
+   * the finding with its saved comment in this view.
+   * @param {object} suggestion
+   * @returns {HTMLElement|null}
+   */
+  _buildRenderedSuggestionCard(suggestion) {
+    if (!this.suggestionManager?.createSuggestionRow) return null;
+    const lineNumber = suggestion.line_start ?? suggestion.line_end;
+    const row = this.suggestionManager.createSuggestionRow([suggestion], {
+      fileName: suggestion.file,
+      lineNumber,
+      side: suggestion.side || 'RIGHT',
+      diffPosition: suggestion.diff_position || suggestion.position || '',
+      isFileLevel: false
+    });
+    const card = row.querySelector('.ai-suggestion');
+    if (!card) return null;
+    card.classList.add('rendered-markdown-ai-suggestion');
+    card.querySelector('.ai-action-edit')?.remove();
+    card.querySelector('.ai-suggestion-collapsed-content')?.remove();
+    return card;
+  }
+
   // Deterministic client-side ceiling on the RAW (pre-parse) size of a
   // Markdown file's NEW content that Rendered mode will attempt to build.
   // RenderedDocumentView.render() re-parses + re-sanitizes EVERY top-level
@@ -4856,6 +4906,21 @@ class PRManager {
         onCreateComment: (payload) => this._createRenderedBlockComment(filePath, payload),
         onEditComment: (commentId, body) => this._editRenderedBlockComment(commentId, body),
         onDeleteComment: (commentId) => this._deleteRenderedBlockComment(commentId),
+        onChatTarget: (target) => {
+          if (!window.chatPanel) return;
+          window.chatPanel.open({
+            commentContext: {
+              type: 'line',
+              body: null,
+              file: target.file || filePath,
+              line_start: target.line_start,
+              line_end: target.line_end || target.line_start,
+              side: target.side || 'RIGHT',
+              source: 'user'
+            }
+          });
+        },
+        onBuildSuggestionCard: (suggestion) => this._buildRenderedSuggestionCard(suggestion),
         // Recount AFTER the view has added/removed its own card. The
         // create/delete handlers above resolve before that happens, so the
         // count they take is one card stale: it misses a comment whose only
@@ -4872,9 +4937,13 @@ class PRManager {
     view.render();
     this._renderedDocuments.set(filePath, view);
 
+    const existingSuggestions = (this.aiSuggestions || []).filter(
+      (s) => this._isRenderableSuggestion(s, filePath)
+    );
     const existingComments = (this.userComments || []).filter(
       (c) => this._isRenderableComment(c, filePath)
     );
+    view.setSuggestions(existingSuggestions);
     view.setComments(existingComments);
 
     this._renderOutlineSidebar();
@@ -5318,6 +5387,34 @@ class PRManager {
       this.userComments[index] = { ...this.userComments[index], ...comment };
     }
     this._refreshRenderedDocumentsComments();
+  }
+
+  /**
+   * Re-display the current AI-review finding set inside every active
+   * RenderedDocumentView after a run/level load or status change.
+   */
+  _refreshRenderedDocumentsSuggestions() {
+    if (!this._renderedDocuments) return;
+    for (const [filePath, view] of this._renderedDocuments) {
+      const suggestions = (this.aiSuggestions || []).filter(
+        (s) => this._isRenderableSuggestion(s, filePath)
+      );
+      view.setSuggestions(suggestions);
+    }
+  }
+
+  /**
+   * Update one suggestion in the Rendered-view source of truth after an
+   * adopt/dismiss/restore action, then refresh every live document.
+   * @param {number|string} suggestionId
+   * @param {'active'|'dismissed'|'adopted'} status
+   */
+  updateRenderedSuggestionStatus(suggestionId, status) {
+    const wanted = String(suggestionId);
+    this.aiSuggestions = (this.aiSuggestions || []).map((suggestion) =>
+      String(suggestion.id) === wanted ? { ...suggestion, status } : suggestion
+    );
+    this._refreshRenderedDocumentsSuggestions();
   }
 
   /**
@@ -7806,6 +7903,8 @@ class PRManager {
 
   async displayAISuggestions(suggestions) {
     await this.suggestionManager.displayAISuggestions(suggestions);
+    this.aiSuggestions = Array.isArray(suggestions) ? suggestions.slice() : [];
+    this._refreshRenderedDocumentsSuggestions();
     // Refresh minimize-mode indicators (no-op when minimize mode is off)
     if (this.commentMinimizer) {
       this.commentMinimizer.refreshIndicators();
@@ -7979,7 +8078,12 @@ class PRManager {
     // `registerCreatedUserComment`, so the three adoption call sites
     // (adopt-as-is, edit-then-adopt, and the file-level branch's sibling
     // path) cannot double-insert the same comment.
+    // Register the saved comment BEFORE removing the pending finding from
+    // Rendered mode. Besides avoiding a visible empty-state flicker, this
+    // guarantees that a suggestion-card refresh failure can never prevent the
+    // already-persisted adopted comment from reaching the reading view.
     this.registerCreatedUserComment(newComment);
+    this.updateRenderedSuggestionStatus(suggestionId, 'adopted');
 
     if (this.suggestionNavigator?.suggestions) {
       const updatedSuggestions = this.suggestionNavigator.suggestions.map(s =>
@@ -8227,6 +8331,7 @@ class PRManager {
         );
         this.suggestionNavigator.updateSuggestions(updatedSuggestions);
       }
+      this.updateRenderedSuggestionStatus(suggestionId, 'dismissed');
 
       if (window.aiPanel) {
         window.aiPanel.updateFindingStatus(suggestionId, 'dismissed');
@@ -8292,6 +8397,7 @@ class PRManager {
         );
         this.suggestionNavigator.updateSuggestions(updatedSuggestions);
       }
+      this.updateRenderedSuggestionStatus(suggestionId, 'active');
 
       if (window.aiPanel) {
         window.aiPanel.updateFindingStatus(suggestionId, 'active');

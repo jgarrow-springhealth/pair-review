@@ -1181,7 +1181,7 @@ class AIPanel {
     }
 
     /**
-     * Scroll to an AI finding/suggestion in the diff view
+     * Scroll to an AI finding/suggestion on the currently visible surface
      * @param {string} findingId
      * @param {string} file
      * @param {number|string} line
@@ -1190,19 +1190,73 @@ class AIPanel {
      */
     async scrollToFinding(findingId, file, line, side) {
         const myGen = ++this._navGen;
+        const finding = this.findings?.find(f => String(f.id) === String(findingId));
+        // An adopted finding no longer owns an inline suggestion card; its
+        // persisted child comment is now the canonical feedback object. Route
+        // through comment navigation so the current Diff/Rendered mode is
+        // honored instead of falling through to the old Diff suggestion row.
+        if (finding?.status === 'adopted') {
+            const comments = [
+                ...(this.comments || []),
+                ...(window.prManager?.userComments || [])
+            ];
+            const adoptedComment = comments.find(comment =>
+                String(comment.parent_id) === String(findingId)
+                && comment.status !== 'inactive'
+            ) || comments.find(comment => String(comment.parent_id) === String(findingId));
+            if (adoptedComment) {
+                return this.scrollToComment(
+                    adoptedComment.id,
+                    adoptedComment.file || file,
+                    adoptedComment.line_start ?? line,
+                    adoptedComment.side || side
+                );
+            }
+        }
+
         // Resolve the diff side: explicit arg wins, else the finding's own side,
         // else RIGHT. Deletions live on the LEFT, so a hardcoded RIGHT would
         // reveal the wrong line for deletion-side findings.
-        const resolvedSide = side
-            || this.findings?.find(f => String(f.id) === String(findingId))?.side
-            || 'RIGHT';
+        const resolvedSide = side || finding?.side || 'RIGHT';
+        const isFileLevel = !!finding
+            && (finding.is_file_level === 1 || finding.is_file_level === true);
         // Expand the file first if it's collapsed
         const expansion = this.expandFileIfCollapsed(file);
         if (expansion && typeof expansion.then === 'function') await expansion;
-        // Always render the target's lazy body — an expanded-but-offscreen
-        // body has no suggestion rows until rendered, so the lookup below
-        // would miss on the first attempt (expansion only covers the
-        // collapsed case).
+        if (myGen !== this._navGen) return;
+
+        // A finding exists on both surfaces while a Markdown file is in
+        // Rendered mode. Prefer the visible rendered copy; querying the first
+        // `.ai-suggestion` used to select the earlier, CSS-hidden Diff row.
+        const renderedFinding = findingId
+            ? Array.from(document.querySelectorAll('.rendered-markdown-suggestion-card'))
+                .find(el => el.dataset.renderedSuggestionId === String(findingId)
+                    && el.closest('.rendered-mode-active'))
+            : null;
+        if (renderedFinding) {
+            const contentTarget = this._resolveRenderedLineContentTarget(renderedFinding, line);
+            const findingCard = renderedFinding.querySelector('.ai-suggestion') || renderedFinding;
+            this._scrollDiffTarget(contentTarget);
+            contentTarget.classList.add('rendered-markdown-navigation-target');
+            findingCard.classList.add('current-suggestion');
+            setTimeout(() => {
+                contentTarget.classList.remove('rendered-markdown-navigation-target');
+                findingCard.classList.remove('current-suggestion');
+            }, 2000);
+            return;
+        }
+
+        // LEFT-side or otherwise non-renderable line findings have no honest
+        // destination in current-file Markdown. Reveal their Diff surface
+        // rather than trying to scroll an element hidden behind Rendered mode.
+        const findingWrapper = file && window.prManager?.findFileElement?.(file);
+        if (!isFileLevel && findingWrapper?.classList.contains('rendered-mode-active')
+            && window.prManager?.setFileRenderMode) {
+            await window.prManager.setFileRenderMode(file, 'diff');
+            if (myGen !== this._navGen) return;
+        }
+
+        // Diff navigation needs an expanded, materialized lazy body.
         if (file && window.prManager?.ensureFileBodyRendered) {
             try { await window.prManager.ensureFileBodyRendered(file); } catch { /* best effort */ }
         }
@@ -1214,6 +1268,7 @@ class AIPanel {
                 await window.prManager.ensureLinesVisible([
                     { file, line_start: parseInt(line, 10), line_end: parseInt(line, 10), side: resolvedSide }
                 ]);
+                if (myGen !== this._navGen) return;
             }
 
             let targetSuggestion = null;
@@ -1264,7 +1319,7 @@ class AIPanel {
 
         // A newer navigation took over while we awaited — let it win.
         if (myGen !== this._navGen) return;
-        doScroll();
+        await doScroll();
     }
 
     /**
@@ -1332,7 +1387,67 @@ class AIPanel {
     }
 
     /**
-     * Scroll to a user comment in the diff view
+     * Resolve the rendered CONTENT annotated by a comment card. Scrolling to
+     * the card itself can put the actual line above the sticky toolbar, and
+     * was especially misleading for list/table feedback whose card used to
+     * sit at the end of the whole block.
+     * @param {HTMLElement} card
+     * @param {number|string} line
+     * @returns {HTMLElement}
+     * @private
+     */
+    _resolveRenderedCommentContentTarget(card, line) {
+        if (!card?.classList?.contains('rendered-markdown-comment-card')) return card;
+        const container = card.closest('.rendered-markdown-container');
+        const key = card.dataset.renderedTargetKey;
+        if (container && key) {
+            const exactTarget = Array.from(container.querySelectorAll('.rendered-markdown-target'))
+                .find(el => el.dataset.renderedTargetKey === key);
+            if (exactTarget) return exactTarget;
+        }
+        const gap = card.closest('.rendered-markdown-gap, .rendered-markdown-orphan-comments');
+        if (gap) return gap;
+        return this._resolveRenderedLineContentTarget(card, line);
+    }
+
+    /**
+     * Find the narrowest unambiguous rendered target containing a line.
+     * Rows and list items are safe line-level destinations; cells are not,
+     * because every Markdown-table cell shares the row's source line.
+     * Falls back to the enclosing top-level block content.
+     * @param {HTMLElement} placement
+     * @param {number|string} line
+     * @returns {HTMLElement}
+     * @private
+     */
+    _resolveRenderedLineContentTarget(placement, line) {
+        const block = placement?.closest?.('.rendered-markdown-block');
+        const wanted = Number.parseInt(line, 10);
+        if (block && Number.isInteger(wanted)) {
+            const candidates = Array.from(block.querySelectorAll('.rendered-markdown-target'))
+                .filter(el => {
+                    const kind = el.dataset.renderedTargetKind;
+                    const start = Number(el.dataset.renderedStartLine);
+                    const end = Number(el.dataset.renderedEndLine);
+                    return (kind === 'list-item' || kind === 'nested-list-item' || kind === 'table-row')
+                        && start <= wanted && wanted <= end;
+                })
+                .sort((a, b) => {
+                    const aSpan = Number(a.dataset.renderedEndLine) - Number(a.dataset.renderedStartLine);
+                    const bSpan = Number(b.dataset.renderedEndLine) - Number(b.dataset.renderedStartLine);
+                    if (aSpan !== bSpan) return aSpan - bSpan;
+                    // `- - child` can put parent and nested items on the same
+                    // one-line range; the nested item is the more precise one.
+                    return Number(b.dataset.renderedTargetKind === 'nested-list-item')
+                        - Number(a.dataset.renderedTargetKind === 'nested-list-item');
+                });
+            if (candidates[0]) return candidates[0];
+        }
+        return block?.querySelector('.rendered-markdown-block-content') || block || placement;
+    }
+
+    /**
+     * Scroll to a user comment on the currently visible surface
      * @param {string} commentId
      * @param {string} file
      * @param {number|string} line
@@ -1343,14 +1458,45 @@ class AIPanel {
         const myGen = ++this._navGen;
         // Resolve the diff side: explicit arg wins, else the comment's own side,
         // else RIGHT.
-        const resolvedSide = side
-            || this.comments?.find(c => String(c.id) === String(commentId))?.side
-            || 'RIGHT';
+        const comment = this.comments?.find(c => String(c.id) === String(commentId));
+        const resolvedSide = side || comment?.side || 'RIGHT';
+        const isFileLevel = !!comment
+            && (comment.is_file_level === 1 || comment.is_file_level === true);
         // Expand the file first if it's collapsed
         const expansion = this.expandFileIfCollapsed(file);
         if (expansion && typeof expansion.then === 'function') await expansion;
-        // Always render the target's lazy body — comment rows don't exist
-        // inside an unrendered body, so the lookup below would miss.
+        // Rendered mode already owns a precise visible card and semantic
+        // content target. Do not materialize/expand hidden Diff rows first:
+        // that asynchronous work delayed the jump and let older clicks race
+        // newer ones. It also made a single click appear inert on large PRs.
+        const earlyTarget = commentId ? this._resolveLineCommentTarget(commentId) : null;
+        if (!isFileLevel
+            && earlyTarget?.classList?.contains('rendered-markdown-comment-card')
+            && earlyTarget.closest('.rendered-mode-active')) {
+            const contentTarget = this._resolveRenderedCommentContentTarget(earlyTarget, line);
+            const commentTarget = earlyTarget.querySelector('.user-comment') || earlyTarget;
+            this._scrollDiffTarget(contentTarget);
+            contentTarget.classList.add('rendered-markdown-navigation-target');
+            commentTarget.classList.add('highlight-flash');
+            setTimeout(() => {
+                contentTarget.classList.remove('rendered-markdown-navigation-target');
+                commentTarget.classList.remove('highlight-flash');
+            }, 2000);
+            return;
+        }
+
+        // A line comment that cannot be represented against the current/new
+        // Markdown (most importantly a LEFT-side comment) still has a valid
+        // Diff destination. Switch surfaces instead of scrolling its hidden
+        // row and appearing to do nothing.
+        const commentWrapper = file && window.prManager?.findFileElement?.(file);
+        if (!isFileLevel && commentWrapper?.classList.contains('rendered-mode-active')
+            && window.prManager?.setFileRenderMode) {
+            await window.prManager.setFileRenderMode(file, 'diff');
+            if (myGen !== this._navGen) return;
+        }
+
+        // Diff navigation still needs the lazy body before its row can exist.
         if (file && window.prManager?.ensureFileBodyRendered) {
             try { await window.prManager.ensureFileBodyRendered(file); } catch { /* best effort */ }
         }
@@ -1360,16 +1506,12 @@ class AIPanel {
                 await window.prManager.ensureLinesVisible([
                     { file, line_start: parseInt(line, 10), line_end: parseInt(line, 10), side: resolvedSide }
                 ]);
+                // A later sidebar click may have taken over while the gap was
+                // expanding. Never let this stale call snap back afterward.
+                if (myGen !== this._navGen) return;
             }
 
             let targetElement = null;
-            let isFileLevel = false;
-
-            // Check if this is a file-level comment
-            const comment = this.comments.find(c => String(c.id) === String(commentId));
-            if (comment && (comment.is_file_level === 1 || comment.is_file_level === true)) {
-                isFileLevel = true;
-            }
 
             // For file-level comments, find the comment card in the file-comments-zone
             if (isFileLevel && commentId) {
@@ -1423,7 +1565,7 @@ class AIPanel {
 
         // A newer navigation took over while we awaited — let it win.
         if (myGen !== this._navGen) return;
-        doScroll();
+        await doScroll();
     }
 
     /**

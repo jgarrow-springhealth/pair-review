@@ -140,6 +140,69 @@ describe('AIPanel jump-to-comment with Rendered Markdown mode', () => {
     });
   });
 
+  describe('scrollToFinding in Rendered mode', () => {
+    it('routes an adopted finding to its child comment on the currently visible surface', async () => {
+      const { renderedCard } = buildSurfaces({ commentId: 55, renderedModeActive: true });
+      const panel = makePanel([{
+        id: 55,
+        parent_id: 44,
+        file: 'docs/guide.md',
+        line_start: 11,
+        side: 'RIGHT',
+        status: 'active'
+      }]);
+      panel.findings = [{
+        id: 44,
+        file: 'docs/guide.md',
+        line_start: 11,
+        side: 'RIGHT',
+        status: 'adopted'
+      }];
+
+      await panel.scrollToFinding('44', 'docs/guide.md', 11);
+
+      expect(panel._scrollDiffTarget).toHaveBeenCalledWith(renderedCard);
+      expect(renderedCard.classList.contains('highlight-flash')).toBe(true);
+      expect(window.prManager.ensureFileBodyRendered).not.toHaveBeenCalled();
+      expect(window.prManager.ensureLinesVisible).not.toHaveBeenCalled();
+    });
+
+    it('prefers the visible Rendered finding and scrolls to its unambiguous line target', async () => {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'd2h-file-wrapper rendered-mode-active';
+      const container = document.createElement('div');
+      container.className = 'rendered-markdown-container';
+      const block = document.createElement('div');
+      block.className = 'rendered-markdown-block';
+      const row = document.createElement('tr');
+      row.className = 'rendered-markdown-target';
+      row.dataset.renderedTargetKind = 'table-row';
+      row.dataset.renderedStartLine = '25';
+      row.dataset.renderedEndLine = '25';
+      const placement = document.createElement('div');
+      placement.className = 'rendered-markdown-suggestion-card';
+      placement.dataset.renderedSuggestionId = '44';
+      const suggestion = document.createElement('div');
+      suggestion.className = 'ai-suggestion';
+      suggestion.dataset.suggestionId = '44';
+      placement.appendChild(suggestion);
+      block.append(row, placement);
+      container.appendChild(block);
+      wrapper.appendChild(container);
+      document.body.appendChild(wrapper);
+
+      const panel = makePanel();
+      panel.findings = [{ id: 44, side: 'RIGHT' }];
+      await panel.scrollToFinding('44', 'docs/guide.md', 25);
+
+      expect(panel._scrollDiffTarget).toHaveBeenCalledWith(row);
+      expect(row.classList.contains('rendered-markdown-navigation-target')).toBe(true);
+      expect(suggestion.classList.contains('current-suggestion')).toBe(true);
+      expect(window.prManager.ensureFileBodyRendered).not.toHaveBeenCalled();
+      expect(window.prManager.ensureLinesVisible).not.toHaveBeenCalled();
+    });
+  });
+
   describe('scrollToComment end-to-end', () => {
     it('scrolls to (and flashes) the Rendered card when the file is in Rendered mode', async () => {
       const { renderedCard, diffRow } = buildSurfaces({ commentId: 11, renderedModeActive: true });
@@ -166,16 +229,48 @@ describe('AIPanel jump-to-comment with Rendered Markdown mode', () => {
       expect(renderedCard.classList.contains('highlight-flash')).toBe(false);
     });
 
-    it('still reveals the target line in the Diff surface first, so toggling back to Diff lands on the row', async () => {
+    it('jumps immediately in Rendered mode without materializing the hidden Diff body first', async () => {
       buildSurfaces({ commentId: 11, renderedModeActive: true });
       const panel = makePanel([{ id: 11, side: 'RIGHT' }]);
 
       await panel.scrollToComment('11', 'docs/guide.md', 11);
 
-      expect(window.prManager.ensureFileBodyRendered).toHaveBeenCalledWith('docs/guide.md');
-      expect(window.prManager.ensureLinesVisible).toHaveBeenCalledWith([
-        { file: 'docs/guide.md', line_start: 11, line_end: 11, side: 'RIGHT' }
-      ]);
+      expect(window.prManager.ensureFileBodyRendered).not.toHaveBeenCalled();
+      expect(window.prManager.ensureLinesVisible).not.toHaveBeenCalled();
+    });
+
+    it('scrolls to and highlights the exact nested rendered content rather than only its card', async () => {
+      const { wrapper, renderedCard } = buildSurfaces({ commentId: 12, renderedModeActive: true });
+      const container = wrapper.querySelector('.rendered-markdown-container');
+      const target = document.createElement('li');
+      target.className = 'rendered-markdown-target';
+      target.dataset.renderedTargetKey = 'nested-list-item|25|25|0';
+      container.prepend(target);
+      renderedCard.dataset.renderedTargetKey = 'nested-list-item|25|25|0';
+      const panel = makePanel([{ id: 12, side: 'RIGHT' }]);
+
+      await panel.scrollToComment('12', 'docs/guide.md', 25);
+
+      expect(panel._scrollDiffTarget).toHaveBeenCalledWith(target);
+      expect(target.classList.contains('rendered-markdown-navigation-target')).toBe(true);
+      expect(renderedCard.classList.contains('highlight-flash')).toBe(true);
+      expect(window.prManager.ensureLinesVisible).not.toHaveBeenCalled();
+    });
+
+    it('switches to Diff when a line comment has no honest Rendered destination', async () => {
+      const { wrapper, diffRow } = buildSurfaces({
+        commentId: 13, renderedModeActive: true, withRenderedCard: false
+      });
+      window.prManager.findFileElement = vi.fn(() => wrapper);
+      window.prManager.setFileRenderMode = vi.fn(async (_file, mode) => {
+        wrapper.classList.toggle('rendered-mode-active', mode === 'rendered');
+      });
+      const panel = makePanel([{ id: 13, side: 'LEFT' }]);
+
+      await panel.scrollToComment('13', 'docs/guide.md', 11);
+
+      expect(window.prManager.setFileRenderMode).toHaveBeenCalledWith('docs/guide.md', 'diff');
+      expect(panel._scrollDiffTarget).toHaveBeenCalledWith(diffRow);
     });
 
     it('file-level comments are unaffected by Rendered mode', async () => {

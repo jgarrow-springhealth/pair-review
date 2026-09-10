@@ -148,6 +148,26 @@ describe('renderMarkdown (sanitized, html enabled)', () => {
       expect(html).toContain('<td>1</td>');
     });
 
+    it('renders checked and unchecked task-list markers as disabled checkboxes', () => {
+      const html = render('- [ ] Pending\n- [X] Complete\n- [x] Also complete');
+      const document = new JSDOM(html).window.document;
+      const items = Array.from(document.querySelectorAll('li.task-list-item'));
+      const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+
+      expect(items).toHaveLength(3);
+      expect(checkboxes).toHaveLength(3);
+      expect(checkboxes.map((checkbox) => checkbox.checked)).toEqual([false, true, true]);
+      expect(checkboxes.every((checkbox) => checkbox.disabled)).toBe(true);
+      expect(document.body.textContent).not.toContain('[ ]');
+      expect(document.body.textContent).not.toContain('[X]');
+    });
+
+    it('does not convert checkbox-like text outside a list item', () => {
+      const html = render('Status: [ ] pending and [X] complete');
+      expect(html).not.toContain('type="checkbox"');
+      expect(html).toContain('[ ] pending and [X] complete');
+    });
+
     it('renders strikethrough as <s>', () => {
       expect(render('~~gone~~')).toContain('<s>gone</s>');
     });
@@ -266,6 +286,13 @@ describe('renderMarkdown fallback (no DOMPurify, html disabled)', () => {
     expect(render('**bold**')).toContain('<strong>bold</strong>');
   });
 
+  it('still renders safe generated task-list checkboxes', () => {
+    const document = new JSDOM(render('- [ ] Pending\n- [X] Complete')).window.document;
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    expect(checkboxes.map((checkbox) => checkbox.checked)).toEqual([false, true]);
+    expect(checkboxes.every((checkbox) => checkbox.disabled)).toBe(true);
+  });
+
   it('returns empty string for empty input', () => {
     expect(render('')).toBe('');
   });
@@ -334,6 +361,19 @@ describe('sanitizeHtml', () => {
     expect(out).not.toContain('<script');
     expect(out).not.toContain('<!--');
   });
+
+  it('forces allowed raw HTML inputs to be inert checkboxes', () => {
+    const purify = createDOMPurify(new JSDOM('').window);
+    const out = sanitizeHtml(
+      purify,
+      '<input type="text" value="editable" class="app-toolbar">'
+    );
+    const input = new JSDOM(out).window.document.querySelector('input');
+    expect(input.type).toBe('checkbox');
+    expect(input.disabled).toBe(true);
+    expect(input.hasAttribute('value')).toBe(false);
+    expect(input.hasAttribute('class')).toBe(false);
+  });
 });
 
 describe('exported allowlists', () => {
@@ -343,10 +383,14 @@ describe('exported allowlists', () => {
     }
   });
 
-  it('permits link attributes', () => {
+  it('permits link and inert task-list checkbox markup', () => {
     expect(ALLOWED_ATTR).toContain('href');
     expect(ALLOWED_ATTR).toContain('target');
     expect(ALLOWED_ATTR).toContain('rel');
+    expect(ALLOWED_TAGS).toContain('input');
+    expect(ALLOWED_ATTR).toContain('type');
+    expect(ALLOWED_ATTR).toContain('checked');
+    expect(ALLOWED_ATTR).toContain('disabled');
   });
 });
 

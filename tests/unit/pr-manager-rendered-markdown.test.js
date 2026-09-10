@@ -32,6 +32,7 @@ const { RenderedDocumentView } = require('../../public/js/modules/rendered-docum
 // Same workaround already used by tests/unit/comment-manager-getcodefromlines.test.js.
 global.window = global.window || {};
 const { CommentManager } = require('../../public/js/modules/comment-manager.js');
+const { SuggestionManager } = require('../../public/js/modules/suggestion-manager.js');
 const { LineTracker } = require('../../public/js/modules/line-tracker.js');
 const { HunkParser } = require('../../public/js/modules/hunk-parser.js');
 const GapCoordinates = require('../../public/js/modules/gap-coordinates.js');
@@ -147,6 +148,7 @@ describe('PRManager Rendered Markdown view', () => {
     mgr._fileViewMode = new Map();
     mgr._activeRenderedFile = null;
     mgr.userComments = [];
+    mgr.aiSuggestions = [];
     mgr._clientId = 'test-client';
     // Real production collaborators for the legacy Diff-view comment row
     // path (displayUserComment/editUserComment/saveEditedUserComment/
@@ -154,6 +156,7 @@ describe('PRManager Rendered Markdown view', () => {
     // comment-CRUD-sync tests below. Not needed by the other describe
     // blocks in this file, but harmless to always set up.
     mgr.commentManager = new CommentManager(mgr);
+    mgr.suggestionManager = new SuggestionManager(mgr);
     mgr.lineTracker = new LineTracker();
   });
 
@@ -248,6 +251,31 @@ describe('PRManager Rendered Markdown view', () => {
       expect(renderedContainer.querySelectorAll('.rendered-markdown-block')).toHaveLength(2);
       expect(mgr._activeRenderedFile).toBe('docs/guide.md');
       expect(mgr._renderedDocuments.has('docs/guide.md')).toBe(true);
+    });
+
+    it('opens chat from rendered block controls with the same line-range context as Diff mode', async () => {
+      const { renderedContainer } = addFileWrapper('docs/guide.md');
+      mgr.changedFilesByPath.set('docs/guide.md', {
+        file: 'docs/guide.md', patch: null, insertions: 1, deletions: 1
+      });
+      sandbox.fetch = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ newContents: '# Title\n\nParagraph A\nParagraph B\n' })
+      }));
+      sandbox.chatPanel = { open: vi.fn() };
+
+      await mgr.setFileRenderMode('docs/guide.md', 'rendered');
+      const paragraphBlock = Array.from(
+        renderedContainer.querySelectorAll('.rendered-markdown-block')
+      ).find((block) => block.dataset.startLine === '3');
+      paragraphBlock.querySelector('.rendered-markdown-block-chat-btn').click();
+
+      expect(sandbox.chatPanel.open).toHaveBeenCalledWith({
+        commentContext: {
+          type: 'line', body: null, file: 'docs/guide.md',
+          line_start: 3, line_end: 4, side: 'RIGHT', source: 'user'
+        }
+      });
     });
 
     it('toggling back to diff hides the rendered container without discarding the built view (no re-fetch)', async () => {
@@ -1653,6 +1681,80 @@ describe('PRManager Rendered Markdown view', () => {
           [9004, 'dismissed']
         ]);
       });
+    });
+  });
+
+  describe('AI review suggestions reach the Rendered view', () => {
+    const activeSuggestion = {
+      id: 8801,
+      file: 'docs/guide.md',
+      line_start: 3,
+      line_end: 3,
+      side: 'RIGHT',
+      status: 'active',
+      type: 'bug',
+      severity: 'high',
+      title: 'AI review finding',
+      body: 'Raw finding body',
+      formattedBody: '**Rendered finding body**'
+    };
+
+    async function openRenderedGuide() {
+      addFileWrapper('docs/guide.md');
+      mgr.changedFilesByPath.set('docs/guide.md', {
+        file: 'docs/guide.md', patch: null, insertions: 1, deletions: 1
+      });
+      sandbox.fetch = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ newContents: '# Title\n\nParagraph A\n' })
+      }));
+      await mgr.setFileRenderMode('docs/guide.md', 'rendered');
+      return mgr._renderedDocuments.get('docs/guide.md').container;
+    }
+
+    it('shows active RIGHT-side line findings using the established suggestion card', async () => {
+      mgr.aiSuggestions = [
+        activeSuggestion,
+        { ...activeSuggestion, id: 8802, status: 'dismissed', title: 'Dismissed' },
+        { ...activeSuggestion, id: 8803, status: 'adopted', title: 'Adopted' },
+        { ...activeSuggestion, id: 8804, side: 'LEFT', title: 'Old-side' },
+        { ...activeSuggestion, id: 8805, file: 'docs/other.md', title: 'Other file' },
+        { ...activeSuggestion, id: 8806, is_file_level: 1, line_start: null, title: 'File level' }
+      ];
+
+      const container = await openRenderedGuide();
+      const placements = container.querySelectorAll('.rendered-markdown-suggestion-card');
+      expect(placements).toHaveLength(1);
+      expect(placements[0].dataset.renderedSuggestionId).toBe('8801');
+      expect(placements[0].querySelector('.ai-suggestion')).toBeTruthy();
+      expect(placements[0].querySelector('.ai-title').textContent).toBe('AI review finding');
+      expect(placements[0].querySelector('.ai-suggestion-body strong').textContent)
+        .toBe('Rendered finding body');
+      expect(placements[0].querySelector('.rendered-markdown-suggestion-line-info').textContent)
+        .toBe('Line 3');
+      expect(placements[0].querySelector('.ai-action-adopt')).toBeTruthy();
+      expect(placements[0].querySelector('.ai-action-chat')).toBeTruthy();
+      expect(placements[0].querySelector('.ai-action-dismiss')).toBeTruthy();
+      expect(placements[0].querySelector('.ai-action-edit')).toBeNull();
+    });
+
+    it('refreshes a live Rendered view after load, dismiss, restore, and adopt state changes', async () => {
+      const container = await openRenderedGuide();
+      expect(container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(0);
+
+      mgr.suggestionManager.displayAISuggestions = vi.fn().mockResolvedValue(undefined);
+      await mgr.displayAISuggestions([activeSuggestion]);
+      expect(mgr.suggestionManager.displayAISuggestions).toHaveBeenCalledWith([activeSuggestion]);
+      expect(container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(1);
+
+      mgr.updateRenderedSuggestionStatus(activeSuggestion.id, 'dismissed');
+      expect(container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(0);
+
+      mgr.updateRenderedSuggestionStatus(activeSuggestion.id, 'active');
+      expect(container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(1);
+
+      mgr.updateRenderedSuggestionStatus(activeSuggestion.id, 'adopted');
+      expect(container.querySelectorAll('.rendered-markdown-suggestion-card')).toHaveLength(0);
     });
   });
 

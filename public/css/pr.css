@@ -2299,6 +2299,23 @@ tr.newly-expanded .d2h-code-line-ctn {
   margin: 4px 0;
 }
 
+/* GitHub-style task lists. The renderer marks only list items whose source
+   starts with [ ], [x], or [X]; disabled inputs keep rendered Markdown
+   read-only while preserving native checked/unchecked semantics. */
+li.task-list-item {
+  list-style: none;
+}
+
+li.task-list-item > input[type="checkbox"],
+li.task-list-item > p:first-child > input[type="checkbox"] {
+  width: 1em;
+  height: 1em;
+  margin: 0 0.45em 0 -1.4em;
+  vertical-align: -0.1em;
+  accent-color: var(--color-accent-primary, #0969da);
+  opacity: 1;
+}
+
 .ai-suggestion-body blockquote,
 .user-comment-body blockquote {
   border-left: 4px solid var(--color-border-primary);
@@ -14225,16 +14242,11 @@ diffs-container {
 .rendered-markdown-container {
   padding: 16px 20px 8px;
   background-color: var(--color-bg-primary);
-  /* Size of the block-level add-comment button, and the right-hand gutter
-     reserved for it inside every block (button + a little breathing room).
-     Declared once here so the button box and the reserved space can never
-     drift apart: the button is absolutely positioned at the block's top
-     right, so any block content allowed to extend under it would be painted
-     over — including the INLINE plus of a wide first list item or header
-     cell, which sits at nearly the same coordinates and would then swallow
-     clicks aimed at the nested target. */
+  /* A stable leading action rail holds the same 22px Chat/+ controls used in
+     Diff gutters. Every top-level block reserves it, so controls never jump
+     to the far end of short or wide rendered elements. */
   --rendered-md-btn-size: 22px;
-  --rendered-md-gutter: 28px;
+  --rendered-md-action-rail: 52px;
 }
 
 .rendered-markdown-loading,
@@ -14251,7 +14263,7 @@ diffs-container {
 
 .rendered-markdown-block {
   position: relative;
-  padding: 4px 0;
+  padding: 4px 0 4px var(--rendered-md-action-rail, 52px);
   border-radius: 6px;
 }
 
@@ -14277,15 +14289,7 @@ diffs-container {
   line-height: 1.65;
   overflow-x: auto;
   overflow-wrap: anywhere;
-  /* Reserve the gutter the absolutely-positioned block button occupies, so
-     rendered content (and the inline nested affordances at the end of a
-     list item / table cell) can never be laid out underneath it. Padding on
-     the CONTENT element, not the block: for an absolutely positioned child
-     `right: 0` resolves against the block's PADDING box, so padding the
-     block itself would just drag the button inwards over the content again.
-     Percentage-free and small, so narrow viewports lose 28px rather than a
-     share of the width. */
-  padding-right: var(--rendered-md-gutter, 28px);
+  padding-right: 0;
 }
 
 .rendered-markdown-block-content > :first-child {
@@ -14426,11 +14430,9 @@ diffs-container {
 
 .rendered-markdown-block-content table {
   border-collapse: collapse;
-  /* A table's intrinsic width can exceed its container, which would push
-     the header row's trailing gutter cell (and its inline plus) back under
-     the block button the padding above just made room for. Capping at the
-     content width makes the browser wrap cell text instead — the table
-     keeps real table semantics for assistive tech (no display swap). */
+  /* Keep wide tables inside the rendered document's scrollable content area.
+     This preserves real table semantics while the leading action gutters and
+     long cell values remain reachable without widening the whole page. */
   max-width: 100%;
 }
 
@@ -14455,71 +14457,116 @@ diffs-container {
   text-decoration: underline;
 }
 
-/* Block-level comment zone */
-.rendered-markdown-add-comment-btn {
+/* Rendered targets reuse the exact Diff-gutter button classes. This section
+   changes only positioning/reveal behavior: visual size, blue fill, shadow,
+   icon sizing, and interaction feedback continue to come from
+   `.add-comment-btn` / `.chat-line-btn` above. */
+.rendered-markdown-block-controls {
   position: absolute;
-  top: 2px;
-  right: 0;
+  top: 4px;
+  left: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 4px;
+  z-index: 20;
+}
+
+.rendered-markdown-add-comment-btn,
+.rendered-markdown-chat-btn {
+  position: static;
+  top: auto;
+  right: auto;
   width: var(--rendered-md-btn-size, 22px);
   height: var(--rendered-md-btn-size, 22px);
-  padding: 0;
-  background-color: var(--color-bg-secondary);
-  border: 1px solid var(--color-border-primary);
-  border-radius: 6px;
-  color: var(--color-text-secondary);
-  cursor: pointer;
+  transform: none;
   opacity: 0;
-  transition: opacity 0.1s;
-  /* `opacity: 0` does NOT stop hit-testing, so without this every block
-     would carry an invisible clickable button at its top right — and on a
-     touch device the first tap on a list item would land on that item's
-     still-invisible plus instead of activating the item. Every rule that
-     reveals a button restores `pointer-events: auto` below. Focusability is
-     unaffected (`pointer-events` does not remove an element from the tab
-     order), so keyboard reviewers still reach it. */
   pointer-events: none;
 }
 
-/* Scoped to the BLOCK-level button only. Nested (list item / row / cell)
-   affordances share the visual style but must NOT all light up when the
-   block is hovered — exactly one nested affordance is revealed at a time,
-   driven by the innermost-target tracking in rendered-document-view.js.
-   `:focus` as well as `:focus-visible` because focus is also restored
-   PROGRAMMATICALLY (`triggerEl.focus()` after Cancel/Escape), which not
-   every engine treats as focus-visible — a focused-but-invisible button is
-   a focus trap for a keyboard reviewer. */
-.rendered-markdown-block:hover .rendered-markdown-block-btn,
+.rendered-markdown-add-comment-btn:hover,
+.rendered-markdown-chat-btn:hover {
+  transform: scale(1.08);
+}
+
+.rendered-markdown-add-comment-btn:active,
+.rendered-markdown-chat-btn:active {
+  transform: scale(0.96);
+}
+
+/* Reveal a block's complete action pair together. Nested controls are
+   excluded so hovering the whole list/table never lights every descendant. */
+.rendered-markdown-block:hover > .rendered-markdown-comments > .rendered-markdown-block-controls > .rendered-markdown-block-btn,
+.rendered-markdown-block:hover > .rendered-markdown-comments > .rendered-markdown-block-controls > .rendered-markdown-block-chat-btn,
 .rendered-markdown-block-btn:focus-visible,
-.rendered-markdown-block-btn:focus {
+.rendered-markdown-block-btn:focus,
+.rendered-markdown-block-chat-btn:focus-visible,
+.rendered-markdown-block-chat-btn:focus {
   opacity: 1;
   pointer-events: auto;
 }
 
-/* Pointers with no hover state (touch, most styluses) can never trigger the
-   `:hover` reveal above, which would make block-level commenting completely
-   unreachable in Rendered mode. Show the block plus permanently there — the
-   same plain plus, unchanged: no filled disc, no new glyph. Nested
-   item/row/cell affordances deliberately stay one-at-a-time: a tap on the
-   item/row/cell activates it (see the `pointerdown` path in
-   `_wireTargetHoverTracking`) and reveals exactly that target's plus. */
 @media (hover: none) {
-  .rendered-markdown-block-btn {
+  .rendered-markdown-block-btn,
+  .rendered-markdown-block-chat-btn {
     opacity: 1;
     pointer-events: auto;
   }
 }
 
-.rendered-markdown-add-comment-btn:hover {
-  background-color: var(--color-accent-bg, rgba(9, 105, 218, 0.1));
-  border-color: var(--color-accent-primary);
-  color: var(--color-accent-primary);
-}
-
 .rendered-markdown-comments-list:empty {
   display: none;
+}
+
+/* Nested feedback owns a target-local list. List-item lists sit directly
+   after that item's text (before any child list); table lists live in the
+   valid companion row immediately following their source row. */
+.rendered-markdown-target-comments-list {
+  clear: both;
+  margin: 4px 0 6px;
+}
+
+.rendered-markdown-table-feedback-row[hidden] {
+  display: none;
+}
+
+.rendered-markdown-block-content td.rendered-markdown-table-feedback-cell {
+  padding: 0 4px 4px;
+  border: none;
+  background: transparent;
+}
+
+.rendered-markdown-table-feedback-cell .rendered-markdown-target-comments-list {
+  margin: 2px 0 4px;
+}
+
+/* Sidebar navigation flashes the annotated rendered content as well as the
+   comment card, making the destination clear even when sticky chrome sits
+   between the two. */
+.rendered-markdown-navigation-target {
+  outline: 2px solid var(--color-accent-primary);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* AI-review findings share the same source-order placement zones as saved
+   comments and reuse the established suggestion card itself. Adopt, dismiss,
+   and chat remain available here; edit-and-adopt stays Diff-only because its
+   form requires a Diff-row anchor. */
+.rendered-markdown-suggestion-card .ai-suggestion {
+  max-width: 100%;
+  margin: 8px 0;
+  animation: none;
+}
+
+.rendered-markdown-suggestion-line-info {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .rendered-markdown-comment-form {
@@ -14652,7 +14699,7 @@ diffs-container {
    `_setActiveTarget`) — so overlapping hierarchies never present several
    ancestor affordances at once with no way to tell which one you'd hit.
 
-   A row's affordance lives in a trailing gutter cell because `tr` may only
+   A row's affordance lives in a leading gutter cell because `tr` may only
    contain `td`/`th`; nothing is ever injected directly under
    `table`/`tr`/`ul`/`ol`.
    ========================================================================== */
@@ -14664,27 +14711,33 @@ diffs-container {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-left: 6px;
+  margin: 0 6px 0 0;
   vertical-align: middle;
   white-space: nowrap;
 }
 
-/* Overrides the absolute positioning the block-level button uses: nested
-   affordances sit inline, at the end of the item/cell they belong to. */
-.rendered-markdown-target-btn {
+/* Nested action pairs are prepended to their item/cell (and row gutters are
+   leading cells), so every control appears at the START of its target rather
+   than after content of arbitrary width. The fixed footprint also prevents
+   text from shifting when hover reveals the controls. */
+.rendered-markdown-target-btn,
+.rendered-markdown-target-chat-btn {
   position: static;
-  width: 18px;
-  height: 18px;
+  width: var(--rendered-md-btn-size, 22px);
+  height: var(--rendered-md-btn-size, 22px);
   opacity: 0;
 }
 
 /* Child-scoped on purpose: a descendant selector would also reveal the
-   buttons of nested targets inside an active parent item. `:focus` is
-   included for the same programmatic-focus reason as the block button. */
+   buttons of nested targets inside an active parent item. */
 .rendered-markdown-target.is-target-active > .rendered-markdown-target-affordance > .rendered-markdown-target-btn,
+.rendered-markdown-target.is-target-active > .rendered-markdown-target-affordance > .rendered-markdown-target-chat-btn,
 .rendered-markdown-target.is-target-active > .rendered-markdown-row-gutter > .rendered-markdown-target-affordance > .rendered-markdown-target-btn,
+.rendered-markdown-target.is-target-active > .rendered-markdown-row-gutter > .rendered-markdown-target-affordance > .rendered-markdown-target-chat-btn,
 .rendered-markdown-target-btn:focus-visible,
-.rendered-markdown-target-btn:focus {
+.rendered-markdown-target-btn:focus,
+.rendered-markdown-target-chat-btn:focus-visible,
+.rendered-markdown-target-chat-btn:focus {
   opacity: 1;
   pointer-events: auto;
 }
@@ -14704,8 +14757,8 @@ tr.rendered-markdown-target.is-target-active > th {
   background-color: var(--color-accent-bg, rgba(9, 105, 218, 0.1));
 }
 
-/* Gutter cell holding a row's affordance: structurally a real cell (valid
-   inside `tr`), visually just margin. */
+/* Leading gutter cell holding a row's affordance: structurally a real cell
+   (valid inside `tr`), visually just margin. */
 .rendered-markdown-block-content td.rendered-markdown-row-gutter {
   border: none;
   width: 1%;
@@ -14714,10 +14767,9 @@ tr.rendered-markdown-target.is-target-active > th {
   vertical-align: middle;
 }
 
-/* Comment-count badge. The card itself lives in the block's comment zone
-   (a card is not valid content for a `tr`, and would wreck a table's
-   layout inside a cell), so this badge is what marks the exact element as
-   carrying feedback. */
+/* Comment-count badge. Cards now sit beside the exact list item or in a
+   companion row beside the exact table row/cell; the badge remains the
+   compact always-visible marker on the annotated element itself. */
 .rendered-markdown-target-badge {
   display: inline-flex;
   align-items: center;

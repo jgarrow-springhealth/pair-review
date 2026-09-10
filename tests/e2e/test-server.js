@@ -881,7 +881,10 @@ async function startTestServer(port) {
         '',
         `| ${Array.from({ length: 30 }, (_, i) => `Wide column ${i + 1}`).join(' | ')} |`,
         `| ${Array.from({ length: 30 }, () => '---').join(' | ')} |`,
-        `| ${Array.from({ length: 30 }, (_, i) => `value ${i + 1}`).join(' | ')} |`
+        `| ${Array.from({ length: 30 }, (_, i) => `value ${i + 1}`).join(' | ')} |`,
+        '',
+        '- [ ] Pending task',
+        '- [X] Completed task'
       ];
       const tail = [
         ...filler,

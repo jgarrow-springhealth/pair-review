@@ -228,6 +228,162 @@ for (const { label, url, reviewApiBase } of [
       expect(shadowText).toContain('This paragraph explains usage.');
     });
 
+    test('shows active AI review findings alongside their rendered source block', async ({ page }) => {
+      await page.route('**/api/reviews/*/suggestions/987654/adopt', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            userCommentId: 987655,
+            formattedBody: '**Check this rendered paragraph.**'
+          })
+        });
+      });
+      await page.evaluate(async () => {
+        await window.prManager.displayAISuggestions([{
+          id: 987654,
+          file: 'docs/guide.md',
+          line_start: 7,
+          line_end: 7,
+          side: 'RIGHT',
+          status: 'active',
+          type: 'bug',
+          severity: 'high',
+          title: 'Rendered AI review finding',
+          body: 'The raw body',
+          formattedBody: '**Check this rendered paragraph.**'
+        }]);
+      });
+
+      const fileWrapper = await toggleRendered(page, 'docs/guide.md');
+      const paragraphBlock = fileWrapper.locator('.rendered-markdown-block', {
+        hasText: 'This paragraph explains usage and was newly added by this PR.'
+      });
+      const finding = paragraphBlock.locator('.rendered-markdown-suggestion-card');
+
+      await expect(finding).toHaveCount(1);
+      await expect(finding.locator('.ai-title')).toHaveText('Rendered AI review finding');
+      await expect(finding.locator('.ai-suggestion-body strong'))
+        .toHaveText('Check this rendered paragraph.');
+      await expect(finding.locator('.rendered-markdown-suggestion-line-info')).toHaveText('Line 7');
+      await expect(finding.locator('.ai-action-adopt')).toBeVisible();
+      // Chat availability is config-gated in the E2E server, but the shared
+      // card must retain the action so it appears when chat is enabled.
+      await expect(finding.locator('.ai-action-chat')).toHaveCount(1);
+      await expect(finding.locator('.ai-action-dismiss')).toBeVisible();
+      await expect(finding.locator('.ai-action-edit')).toHaveCount(0);
+
+      // The right-panel copy shares this id with a CSS-hidden Diff copy.
+      // Navigation must choose the visible Rendered content, not the first
+      // matching `.ai-suggestion` in DOM order.
+      await page.locator('#ai-panel-toggle').click();
+      await page.locator('.finding-item[data-item-type="finding"][data-id="987654"]').click();
+      await expect(paragraphBlock.locator('.rendered-markdown-block-content'))
+        .toHaveClass(/rendered-markdown-navigation-target/);
+      await expect.poll(async () => paragraphBlock.evaluate((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.top >= 0 && rect.top < window.innerHeight;
+      })).toBe(true);
+
+      // Regression: adopting from Rendered mode must replace the pending AI
+      // finding with its saved AI-origin comment on the same rendered block.
+      await finding.locator('.ai-action-adopt').click();
+      await expect(paragraphBlock.locator('.rendered-markdown-suggestion-card')).toHaveCount(0);
+      const adopted = paragraphBlock.locator(
+        '.rendered-markdown-comment-card[data-comment-id="987655"]'
+      );
+      await expect(adopted).toHaveCount(1);
+      await expect(adopted).toHaveClass(/comment-ai-origin/);
+      await expect(adopted.locator('.user-comment-body strong'))
+        .toHaveText('Check this rendered paragraph.');
+
+      // Clicking the now-adopted AI item must follow its persisted child
+      // comment on the CURRENT surface. It must not switch this file back to
+      // Diff merely because the original suggestion card no longer exists.
+      const renderedContent = paragraphBlock.locator('.rendered-markdown-block-content');
+      await renderedContent.evaluate((el) => el.classList.remove('rendered-markdown-navigation-target'));
+      await page.locator('.finding-item[data-item-type="finding"][data-id="987654"]').click();
+      await expect(fileWrapper).toHaveClass(/rendered-mode-active/);
+      await expect(renderedContent).toHaveClass(/rendered-markdown-navigation-target/);
+      await expect(adopted.locator('.user-comment')).toHaveClass(/highlight-flash/);
+
+      // The child entry in the User segment follows the identical rule.
+      await renderedContent.evaluate((el) => el.classList.remove('rendered-markdown-navigation-target'));
+      await page.locator('.segment-btn[data-segment="comments"]').click();
+      await page.locator('.finding-comment[data-id="987655"]').click();
+      await expect(fileWrapper).toHaveClass(/rendered-mode-active/);
+      await expect(renderedContent).toHaveClass(/rendered-markdown-navigation-target/);
+    });
+
+    test('keeps an adopted AI comment beside its nested rendered line instead of the end of the block', async ({ page }) => {
+      await page.route('**/api/reviews/*/suggestions/987656/adopt', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            userCommentId: 987657,
+            formattedBody: '**Accepted nested feedback.**'
+          })
+        });
+      });
+      await page.evaluate(async () => {
+        await window.prManager.displayAISuggestions([{
+          id: 987656,
+          file: 'docs/guide.md',
+          line_start: 66,
+          line_end: 66,
+          side: 'RIGHT',
+          status: 'active',
+          type: 'bug',
+          severity: 'high',
+          title: 'Nested AI finding',
+          body: 'Accepted nested feedback.',
+          formattedBody: '**Accepted nested feedback.**'
+        }]);
+      });
+
+      const fileWrapper = await toggleRendered(page, 'docs/guide.md');
+      const nestedItem = fileWrapper.locator('li li', { hasText: 'Nested alpha item' });
+      const targetList = nestedItem.locator(':scope > .rendered-markdown-target-comments-list');
+      const finding = targetList.locator('.rendered-markdown-suggestion-card');
+      await expect(finding).toBeVisible();
+
+      await finding.locator('.ai-action-adopt').click();
+      const adopted = targetList.locator(
+        '.rendered-markdown-comment-card[data-comment-id="987657"]'
+      );
+      await expect(adopted).toBeVisible();
+      await expect(adopted.locator('.rendered-markdown-comment-target'))
+        .toHaveText('Nested list item, line 66');
+      // The card's placement list is a direct child of the exact item and
+      // appears before any child list, never at the block's trailing zone.
+      expect(await adopted.evaluate((el) => {
+        const list = el.parentElement;
+        return list?.parentElement?.tagName === 'LI'
+          && list.parentElement.textContent.includes('Nested alpha item')
+          && !el.closest('.rendered-markdown-block > .rendered-markdown-comments');
+      })).toBe(true);
+    });
+
+    test('renders checked and unchecked task-list markers as inert checkboxes', async ({ page }) => {
+      const fileWrapper = await toggleRendered(page, 'docs/guide.md');
+      const taskItems = fileWrapper.locator('li.task-list-item');
+      const checkboxes = taskItems.locator('input[type="checkbox"]');
+
+      await expect(taskItems).toHaveCount(2);
+      await expect(taskItems.nth(0)).toContainText('Pending task');
+      await expect(taskItems.nth(1)).toContainText('Completed task');
+      await expect(checkboxes).toHaveCount(2);
+      await expect(checkboxes.nth(0)).not.toBeChecked();
+      await expect(checkboxes.nth(1)).toBeChecked();
+      await expect(checkboxes.nth(0)).toBeDisabled();
+      await expect(checkboxes.nth(1)).toBeDisabled();
+      await expect(taskItems.nth(0)).not.toContainText('[ ]');
+      await expect(taskItems.nth(1)).not.toContainText('[X]');
+    });
+
     test('renders gap-tolerant document rhythm and highlighted scrolling code in both app themes', async ({ page }) => {
       const fileWrapper = await toggleRendered(page, 'docs/guide.md');
       const renderedDocument = fileWrapper.locator('.rendered-markdown-doc');
@@ -565,17 +721,21 @@ for (const { label, url, reviewApiBase } of [
       // The whole-list target is still there, alongside the per-item ones.
       await expect(listBlock.locator('.rendered-markdown-block-btn'))
         .toHaveAttribute('aria-label', /Add comment on the whole list/);
+      await expect(listBlock.locator('.rendered-markdown-block-chat-btn'))
+        .toHaveAttribute('aria-label', /Chat about the whole list/);
       expect(await ariaLabels(
         listBlock.locator('li > .rendered-markdown-target-affordance > .rendered-markdown-target-btn')
       )).toEqual([
-        'Add comment on Nested list item, line 66',
         'Add comment on List item, lines 65–66',
+        'Add comment on Nested list item, line 66',
         'Add comment on List item, line 67'
       ]);
 
       const tableBlock = fileWrapper.locator('.rendered-markdown-block', { hasText: 'Column A' });
       await expect(tableBlock.locator('.rendered-markdown-block-btn'))
         .toHaveAttribute('aria-label', /Add comment on the whole table/);
+      await expect(tableBlock.locator('.rendered-markdown-block-chat-btn'))
+        .toHaveAttribute('aria-label', /Chat about the whole table/);
       expect(await ariaLabels(tableBlock.locator('.rendered-markdown-row-gutter .rendered-markdown-target-btn')))
         .toEqual([
           'Add comment on Table row, line 69',
@@ -610,6 +770,36 @@ for (const { label, url, reviewApiBase } of [
       });
       expect(structuralViolations).toEqual([]);
 
+      // Controls lead their target instead of jumping to the end of content,
+      // and the + reuses the same visual class/style as the Diff gutter.
+      const controlPresentation = await listBlock.evaluate((el) => {
+        const block = el;
+        const content = block.querySelector('.rendered-markdown-block-content');
+        const controls = block.querySelector('.rendered-markdown-block-controls');
+        const plus = controls.querySelector('.rendered-markdown-block-btn');
+        const chat = controls.querySelector('.rendered-markdown-block-chat-btn');
+        const firstItem = block.querySelector('li.rendered-markdown-target');
+        const plusStyle = getComputedStyle(plus);
+        return {
+          controlsBeforeContent: controls.getBoundingClientRect().left < content.getBoundingClientRect().left,
+          itemAffordanceLeads: firstItem.firstElementChild?.classList.contains('rendered-markdown-target-affordance'),
+          plusClass: plus.classList.contains('add-comment-btn'),
+          plusText: plus.textContent,
+          plusSize: `${plusStyle.width}x${plusStyle.height}`,
+          plusBackground: plusStyle.backgroundColor,
+          chatClass: chat.classList.contains('chat-line-btn')
+        };
+      });
+      expect(controlPresentation).toEqual({
+        controlsBeforeContent: true,
+        itemAffordanceLeads: true,
+        plusClass: true,
+        plusText: '+',
+        plusSize: '22pxx22px',
+        plusBackground: 'rgb(9, 105, 218)',
+        chatClass: true
+      });
+
       // The row gutter is UI chrome, not a data column: it must be marked
       // presentational (otherwise every row announces one more column than
       // the header has), while its button stays a focusable, named button.
@@ -623,6 +813,9 @@ for (const { label, url, reviewApiBase } of [
         }))
       );
       expect(gutterA11y.length).toBe(2);
+      expect(await tableBlock.locator('tr.rendered-markdown-target').evaluateAll(
+        (rows) => rows.every((row) => row.firstElementChild?.classList.contains('rendered-markdown-row-gutter'))
+      )).toBe(true);
       for (const g of gutterA11y) {
         expect(g.role).toBe('presentation');
         expect(g.ariaHidden).toBe(false);
@@ -702,6 +895,19 @@ for (const { label, url, reviewApiBase } of [
           reloadedTable.locator(`.rendered-markdown-comment-card[data-comment-id="${commentIds[1]}"] .rendered-markdown-comment-target`)
         ).toHaveText('Table cell, line 71, column 2');
         await expect(reloaded.locator('.rendered-markdown-comment-target.is-stale')).toHaveCount(0);
+
+        // Cards are not collected at the end of the whole table: both live
+        // in the valid companion row immediately after line 71's source row.
+        const placement = await reloadedTable.evaluate((el, ids) => {
+          const sourceRow = el.querySelector('tbody tr.rendered-markdown-target');
+          const feedbackRow = sourceRow?.nextElementSibling;
+          return {
+            adjacent: feedbackRow?.classList.contains('rendered-markdown-table-feedback-row') || false,
+            firstInside: !!feedbackRow?.querySelector(`[data-comment-id="${ids[0]}"]`),
+            secondInside: !!feedbackRow?.querySelector(`[data-comment-id="${ids[1]}"]`)
+          };
+        }, commentIds);
+        expect(placement).toEqual({ adjacent: true, firstInside: true, secondInside: true });
       } finally {
         // Self-cleaning: leave the shared per-worker review as we found it,
         // on the failure path too.
@@ -729,9 +935,31 @@ for (const { label, url, reviewApiBase } of [
 
         const card = fileWrapper.locator(`.rendered-markdown-comment-card[data-comment-id="${commentId}"]`);
         await expect(card.locator('.rendered-markdown-comment-target')).toHaveText('Nested list item, line 66');
+        // The card is local to the exact nested item, not at the end of its
+        // top-level list block.
+        expect(await card.evaluate((el) => {
+          const list = el.parentElement;
+          return list?.classList.contains('rendered-markdown-target-comments-list')
+            && list.parentElement?.tagName === 'LI'
+            && list.parentElement?.textContent.includes('Nested alpha item');
+        })).toBe(true);
         // Relative to the baseline: the badge gained exactly this comment.
         await expect(nestedItem.locator('.rendered-markdown-target-badge'))
           .toHaveText(String(badgeBefore + 1));
+
+        // Clicking this comment in the right Review panel jumps to and
+        // visibly marks its exact nested content without waiting for the
+        // hidden Diff body to expand first.
+        await page.locator('#ai-panel-toggle').click();
+        await page.locator('.segment-btn[data-segment="comments"]').click();
+        const panelItem = page.locator(`.finding-comment[data-id="${commentId}"]`);
+        await expect(panelItem).toBeVisible();
+        await panelItem.click();
+        await expect(nestedItem).toHaveClass(/rendered-markdown-navigation-target/);
+        await expect.poll(async () => nestedItem.evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.top >= 0 && rect.top < window.innerHeight;
+        })).toBe(true);
 
         // Counted exactly once even though the comment also reaches the Diff
         // surface (its out-of-hunk target is revealed before syncing).
