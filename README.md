@@ -6,7 +6,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
-[GitHub Repository](https://github.com/in-the-loop-labs/pair-review)
+[This fork's GitHub Repository](https://github.com/jgarrow-springhealth/pair-review) · [Upstream Repository](https://github.com/in-the-loop-labs/pair-review)
 
 ![pair-review screenshot](https://raw.githubusercontent.com/in-the-loop-labs/pair-review/main/docs/screenshot.png)
 
@@ -19,6 +19,8 @@
   - [Meta-Review](#2-meta-review-judging-ai-suggestions)
   - [AI-Guided Review](#3-ai-guided-review-when-youre-accountable)
 - [Quick Start](#quick-start)
+  - [Install This Fork](#install-this-fork)
+  - [Install the Published Upstream Package](#install-the-published-upstream-package)
 - [Command Line Interface](#command-line-interface)
   - [Local review scope](#local-review-scope)
   - [Headless analysis mode](#headless-analysis-mode)
@@ -123,7 +125,72 @@ You're responsible for the review, but `pair-review` helps you be more thorough.
 
 ## Quick Start
 
-### Installation
+### Install This Fork
+
+This fork retains the upstream npm package name, `@in-the-loop-labs/pair-review`.
+That means a plain `npx @in-the-loop-labs/pair-review` or
+`npm install -g @in-the-loop-labs/pair-review` downloads the published
+**upstream package**, not this fork.
+
+**Option 1: Install this fork directly from GitHub**
+
+```bash
+npm install -g "git+https://github.com/jgarrow-springhealth/pair-review.git#main"
+hash -r  # Refresh the command cache in shells that support it
+pair-review <PR-number-or-URL or --local>
+```
+
+Replace `main` with a tag, branch, or full commit SHA if you want to pin an
+exact revision. To run the fork once without keeping a global installation:
+
+```bash
+npx --yes \
+  --package="git+https://github.com/jgarrow-springhealth/pair-review.git#main" \
+  pair-review <PR-number-or-URL or --local>
+```
+
+**Option 2: Link a local clone (recommended for fork development)**
+
+```bash
+git clone https://github.com/jgarrow-springhealth/pair-review.git
+cd pair-review
+pnpm install
+npm link
+hash -r  # Refresh the command cache in shells that support it
+```
+
+`npm link` replaces a globally installed upstream copy with a symlink to the
+clone. Edits in the clone are therefore used immediately without reinstalling.
+Verify the active executable with:
+
+```bash
+realpath "$(command -v pair-review)"
+npm ls -g @in-the-loop-labs/pair-review --long --json | grep '"resolved"'
+```
+
+For a linked checkout, `realpath` should end in the clone's
+`bin/pair-review.js`, and npm's `resolved` value should be a local `file:` path.
+For a GitHub installation, the `resolved` value should reference
+`jgarrow-springhealth/pair-review`, not the npm registry.
+
+PATH-based integrations that launch the `pair-review` executable—including Pi
+extensions that provide a `/pair-review` command—will use the linked or globally
+installed fork. Shell aliases are not sufficient for these integrations because
+child processes do not expand aliases. Restart the coding-agent process and any
+already-running pair-review server after switching installations; an existing
+server continues running the code with which it was started.
+
+To switch back to the published upstream package:
+
+```bash
+npm unlink -g @in-the-loop-labs/pair-review
+npm install -g @in-the-loop-labs/pair-review
+```
+
+### Install the Published Upstream Package
+
+Use these commands only when you intentionally want the original upstream
+release rather than this fork.
 
 **Option 1: No installation required (npx)**
 
@@ -138,7 +205,7 @@ npm install -g @in-the-loop-labs/pair-review
 pair-review <PR-number-or-URL>
 ```
 
-> **Tip:** Create an alias for frequent use:
+> **Tip:** Create an alias for frequent upstream use:
 > ```bash
 > alias pr='npx @in-the-loop-labs/pair-review'
 > ```
@@ -148,7 +215,10 @@ Either way, pair-review will:
 2. Open the web UI in your browser
 3. Show you a familiar diff view (unified or split/side-by-side, switchable from the diff options menu)
 
-> **Note:** The examples below use the shorter `pair-review` command. If you're using npx without a global install, substitute `npx @in-the-loop-labs/pair-review` instead.
+> **Note:** The examples below use the shorter `pair-review` command. Keep using
+> that command after installing or linking this fork. Substitute
+> `npx @in-the-loop-labs/pair-review` only when you intentionally want the
+> published upstream package.
 
 ### Review a Pull Request
 
@@ -1264,6 +1334,8 @@ Apache-2.0 License - see LICENSE file for details
 
 **Start reviewing better code today:**
 
+After [installing this fork](#install-this-fork):
+
 ```bash
-npx @in-the-loop-labs/pair-review <PR-number-or-URL or --local>
+pair-review <PR-number-or-URL or --local>
 ```
