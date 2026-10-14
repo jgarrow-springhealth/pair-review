@@ -50,8 +50,15 @@ function withAuthorizationPrefix(token) {
  * `refresh: null`, so a github.com PAT client behaves exactly as before
  * (no hook-driven retry).
  *
+ * The optional `cloneUrl` from an object binding (the repo's explicitly
+ * configured `clone_url`) is carried through so `fetchPullRequest` can report
+ * it in place of the API's `base.repo.clone_url` — some GitHub-compatible
+ * hosts omit that field entirely. The legacy bare-token path keeps
+ * `cloneUrl: null`, so a github.com PAT client reports exactly what the API
+ * returned.
+ *
  * @param {string|Object} arg - Token string or binding object
- * @returns {{ token: string, apiHost: string|null, features: Object, refresh: (function(): (string|Promise<string>))|null }}
+ * @returns {{ token: string, apiHost: string|null, features: Object, cloneUrl: string|null, refresh: (function(): (string|Promise<string>))|null }}
  */
 function normaliseBinding(arg) {
   if (typeof arg === 'string') {
@@ -59,6 +66,7 @@ function normaliseBinding(arg) {
       token: arg,
       apiHost: null,
       features: { ...DEFAULT_FEATURES },
+      cloneUrl: null,
       refresh: null
     };
   }
@@ -68,20 +76,23 @@ function normaliseBinding(arg) {
     const features = (arg.features && typeof arg.features === 'object')
       ? { ...DEFAULT_FEATURES, ...arg.features }
       : { ...DEFAULT_FEATURES };
+    const cloneUrl = (typeof arg.cloneUrl === 'string' && arg.cloneUrl) ? arg.cloneUrl : null;
     const refresh = typeof arg.refresh === 'function' ? arg.refresh : null;
-    return { token, apiHost, features, refresh };
+    return { token, apiHost, features, cloneUrl, refresh };
   }
-  return { token: '', apiHost: null, features: { ...DEFAULT_FEATURES }, refresh: null };
+  return { token: '', apiHost: null, features: { ...DEFAULT_FEATURES }, cloneUrl: null, refresh: null };
 }
 
 /**
  * GitHub API client wrapper with error handling and rate limiting.
  *
  * Constructor accepts either a bare token string (legacy) or a binding
- * object `{ token, apiHost, features }` returned by
+ * object `{ token, apiHost, features, cloneUrl }` returned by
  * `resolveHostBinding()`. When a binding is provided, `apiHost` is passed
- * to Octokit as `baseUrl` (defaults to `api.github.com` when null) and
- * `features` controls per-area dispatch into the operations layer.
+ * to Octokit as `baseUrl` (defaults to `api.github.com` when null),
+ * `features` controls per-area dispatch into the operations layer, and
+ * `cloneUrl` (the repo's configured `clone_url`) overrides the clone URL
+ * reported by `fetchPullRequest`.
  *
  * The public method signatures remain identical to the pre-refactor
  * shape — all GraphQL operations are now thin delegations to the
@@ -98,6 +109,11 @@ class GitHubClient {
     this.features = binding.features;
     this.apiHost = binding.apiHost;
     this.token = binding.token;
+    // Explicitly configured canonical clone URL for this repo (`repos[...]
+    // .clone_url`), or null. Wins over the API's `base.repo.clone_url` in
+    // `fetchPullRequest` — it is the user's direct statement of where the git
+    // objects live, and some alt hosts omit the API field altogether.
+    this.cloneUrl = binding.cloneUrl;
     // Capability to obtain a fresh token (e.g. re-run a token_command).
     // Only present for refreshable bindings; null for bare-token / literal
     // / env sources, which therefore get NO 401 refresh-and-retry behaviour.
@@ -257,11 +273,15 @@ class GitHubClient {
         mergeable: data.mergeable,
         mergeable_state: data.mergeable_state,
         html_url: data.html_url,
+        // `base.repo` is absent on some GitHub-compatible hosts, so every
+        // field is read defensively. A configured `clone_url` wins over the
+        // API's value: it is the user's explicit statement of where the git
+        // objects live.
         repository: {
-          full_name: data.base.repo.full_name,
-          clone_url: data.base.repo.clone_url,
-          ssh_url: data.base.repo.ssh_url,
-          default_branch: data.base.repo.default_branch
+          full_name: data.base?.repo?.full_name || `${owner}/${repo}`,
+          clone_url: this.cloneUrl || data.base?.repo?.clone_url,
+          ssh_url: data.base?.repo?.ssh_url,
+          default_branch: data.base?.repo?.default_branch
         }
       };
     } catch (error) {
@@ -1008,94 +1028,6 @@ class GitHubClient {
 
       throw new Error(`Failed to create draft review (${transport}): ${error.message}`);
     }
-  }
-
-  /**
-   * Calculate diff position for a given file path and line number
-   * Position is counted from the first @@ hunk header, where position 1 = first line after @@
-   * @param {string} diffContent - The unified diff content
-   * @param {string} filePath - File path to find in diff
-   * @param {number} lineNumber - Line number in the new file
-   * @returns {number} Diff position or -1 if not found
-   */
-  calculateDiffPosition(diffContent, filePath, lineNumber) {
-    if (!diffContent || !filePath || lineNumber === undefined) {
-      console.warn('calculateDiffPosition: Missing required parameters', {
-        filePath,
-        lineNumber,
-        hasDiffContent: !!diffContent
-      });
-      return -1;
-    }
-
-    const lines = diffContent.split('\n');
-    let inFile = false;
-    let currentFile = '';
-    let position = 0;
-    let newLineNumber = 0;
-    let foundHunk = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      if (line.startsWith('diff --git')) {
-        const match = line.match(/diff --git a\/(.+) b\/(.+)/);
-        if (match) {
-          currentFile = match[2];
-          inFile = currentFile === filePath;
-          position = 0;
-          newLineNumber = 0;
-          foundHunk = false;
-        }
-        continue;
-      }
-
-      if (!inFile) continue;
-
-      if (line.startsWith('@@')) {
-        const match = line.match(/@@ -\d+,?\d* \+(\d+),?\d* @@/);
-        if (match) {
-          newLineNumber = parseInt(match[1]) - 1;
-
-          if (!foundHunk) {
-            position = 0;
-            foundHunk = true;
-          } else {
-            position++;
-          }
-        }
-        continue;
-      }
-
-      if (!foundHunk) continue;
-
-      const isDiffContentLine = line.startsWith('+') || line.startsWith('-') || line.startsWith(' ') || (line === '' && foundHunk);
-
-      if (!isDiffContentLine) continue;
-
-      position++;
-
-      if (line.startsWith('+')) {
-        newLineNumber++;
-        if (newLineNumber === lineNumber) {
-          return position;
-        }
-      } else if (line.startsWith(' ') || (line === '' && foundHunk)) {
-        newLineNumber++;
-        if (newLineNumber === lineNumber) {
-          return position;
-        }
-      }
-    }
-
-    console.warn('calculateDiffPosition: Position not found', {
-      filePath,
-      lineNumber,
-      inFile,
-      foundHunk,
-      finalNewLineNumber: newLineNumber
-    });
-    return -1;
   }
 
   /**

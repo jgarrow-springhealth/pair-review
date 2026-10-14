@@ -579,7 +579,7 @@ describe('PR Management Endpoints', () => {
           'index 1111111..2222222 100644',
           `--- a/${longPath}`,
           `+++ b/${longPath}`,
-          '@@ -1 +1,2 @@',
+          '@@ -1 +1,3 @@',
           ' export const Route = {};',
           '+Route.component = View;',
           '+Route.loader = loader;'
@@ -3637,8 +3637,8 @@ describe('Config Endpoints', () => {
       // rejects the foreign value and returns claude's coherent default rather than
       // publishing a model id no model-card can match — matching what the modal's
       // selectModel() guard does with 'sonnet' anyway. Claude's coherent default is
-      // 'opus-5-high'.
-      expect(response.body.default_model).toBe('opus-5-high');
+      // 'opus-5.5-high'.
+      expect(response.body.default_model).toBe('opus-5.5-high');
     });
 
     // The landing page, its URL-validation errors, and the local-path "that's

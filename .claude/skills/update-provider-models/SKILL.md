@@ -29,7 +29,8 @@ Each provider file has a `*_MODELS` array at the top defining models with:
 - `tagline`, `description`, `badge`, `badgeClass`: UI metadata
 - `default: true`: Marks the default model for the provider
 - `aliases`: Optional extra ids that resolve to this entry (used to keep saved
-  councils/configs working when an id is renamed)
+  councils/configs working when an id is renamed, and for Claude's bare `opus`/`fable`
+  generation aliases, which move to the newest generation on each update)
 
 ## Ground Rules for Probing
 
@@ -38,6 +39,12 @@ Each provider file has a `*_MODELS` array at the top defining models with:
   and Muse's cached catalog did not list Spark 1.3, yet both ids ran fine. Conversely,
   ids a provider file still carries may be dead (gpt-5.4, gemini-3.5-flash). Probe every
   id you keep AND every id you add.
+- **Probe every provider's fast-tier entry on every run**, even when nothing else in
+  that provider changes. The first `fast` entry serves JSON extraction and hunk
+  summaries (`AIProvider.getFastTierModel`; guided tours use the provider default,
+  not the fast tier), so a dead one breaks both silently:
+  `gpt-5.4-mini` was retired for ChatGPT sign-in on 2026-08-31 while it was Codex's
+  only fast entry, and nobody noticed until the 2026-09-22 run.
 - **macOS has no `timeout`.** Wrap probes with perl instead:
   ```
   perl -e 'alarm 120; exec @ARGV' <cli> <args...>
@@ -87,12 +94,22 @@ Each CLI has different model listing commands:
   codex exec -m <slug> -c model_reasoning_effort=low --skip-git-repo-check 'Reply with the single word OK'
   ```
   A retired slug fails with a 400 `The '<slug>' model is not supported when using Codex
-  with a ChatGPT account`; a valid one prints OK. Pricing is not in the cache — use web
-  search (learn.chatgpt.com/docs/models, learn.chatgpt.com/docs/changelog).
+  with a ChatGPT account`; a valid one prints OK. `codex exec` also prints a
+  `reasoning effort: <level>` header line — grep it to confirm each effort level you
+  ship actually took effect. Pricing is not in the cache — use web search
+  (learn.chatgpt.com/docs/models, learn.chatgpt.com/docs/changelog).
 - **Copilot**: No native list command. Use `copilot -p 'list available models'` (non-interactive) or check docs.github.com/en/copilot/reference/ai-models/supported-models
 - **Cursor Agent**: `agent --list-models` — works great, comprehensive output
 - **OpenCode**: `opencode models` — lists all models in `provider/model-id` format (shows bundled + provider models)
-- **Claude**: `claude --help` or check docs at code.claude.com/docs/en/cli-reference
+- **Claude**: `claude --help` or check docs at code.claude.com/docs/en/cli-reference.
+  Probing `--thinking enabled` is non-discriminating on CLI ≥ 2.1.280: the CLI
+  normalizes it and answers cleanly even for adaptive-only models like Fable 5.1, so
+  a clean answer does not prove older CLIs are safe. Decide the `--thinking adaptive`
+  override from the API contract instead (code.claude.com/docs/en/model-config says
+  which models cannot turn thinking off). Confirm effort precedence on the same page:
+  `CLAUDE_CODE_EFFORT_LEVEL` is an explicit choice at the top of the precedence, so it
+  applies to every model; Opus 5.5 defaults to `medium` in the CLI and ignores a
+  top-level user `effortLevel`.
 - **Pi**: `pi --list-models` — shows comprehensive table with provider, model, context, max-out, thinking, images columns.
 - **OMP**: `omp models` (or `omp models --json`) — lists the catalog grouped by provider with context, max-out, thinking, images columns. `omp models find <substring>` searches; `omp models refresh` forces a fresh catalog fetch.
 - **Muse**: No `models list` subcommand — and no models subcommand at all. Do not run
@@ -144,27 +161,31 @@ Also use web search to check:
 ### 5. Update the Provider Files
 
 For each provider, update:
-1. The `*_MODELS` array with new/changed model definitions
-2. The constructor default parameter (should match the model with `default: true`)
-3. The `getDefaultModel()` static method return value
-4. The JSDoc comments describing the models
-5. Keep the tier structure: fast, balanced (default), thorough — every tier must keep at
+1. The `*_MODELS` array with new/changed model definitions. Change a default by
+   moving the `default: true` flag — `getDefaultModel()` and the constructors derive
+   from it (the base class returns the flagged id)
+2. The JSDoc comments describing the models
+3. Keep the tier structure: fast, balanced (default), thorough — every tier must keep at
    least one live entry after removals
-6. Retired ids: remove the entry and list it in the JSDoc "Deprecated" line. Add an
+4. Retired ids: remove the entry and list it in the JSDoc "Deprecated" line. Add an
    `aliases` entry pointing at a successor only when the successor is the same model
    line at the same price and effort (e.g. `gemini-3.5-flash-low` → `gemini-3.8-flash-low`,
    `muse-spark-1.2-high` → `muse-spark-1.3-high`); never alias a dead id onto a
    different model family, an explicit unknown-model error is better than a silent swap.
    For a same-line point release the provider decides: Claude (and other high-attention
    providers) keeps the previous generation as explicit entries, because users hold
-   strong opinions between point releases and a saved council must keep the generation
-   it was written against; lightly used providers such as Muse may replace the entries
-   and alias the old ids onto the new generation in place
-7. Sweep every other place that lists built-in ids: `config.example.json` `_comment`
+   strong opinions between point releases and a council or config that names an
+   explicit id must keep the generation it was written against; lightly used providers
+   such as Muse may replace the entries and alias the old ids onto the new generation
+   in place. Bare generation aliases (Claude's `opus`, `fable`) are the exception to
+   pinning: on each update, move every one to the newest generation's entry at the same
+   effort (XHigh), so configs naming the alias upgrade without losing effort. The old
+   generation stays available under its explicit ids
+5. Sweep every other place that lists built-in ids: `config.example.json` `_comment`
    strings, the README provider tables, `src/main.js` `--model` help text, and the unit
    tests (`tests/unit/<provider>-provider.test.js`, `llm-extraction.test.js`,
    `shared.test.js`, `provider-model.test.js`, `stack-analysis-provider-model.test.js`)
-8. Add a changeset under `.changeset/` per provider touched, bump level `patch` — adding, retiring, or re-tiering built-in models has always shipped as a patch (Opus 5, GPT-5.6, Fable 5.1 all did); reserve `minor` for a new provider
+6. Add a changeset under `.changeset/` per provider touched, bump level `patch` — adding, retiring, or re-tiering built-in models has always shipped as a patch (Opus 5, GPT-5.6, Fable 5.1 all did); reserve `minor` for a new provider, or for moving a bare alias that existing configs resolve through (installs change model without editing their config)
 
 ### 6. Verify Changes
 
@@ -189,6 +210,27 @@ Leave changes uncommitted for the user to review.
 A new flagship does not automatically become the default. If it costs several times
 the current default (GPT-6 Astra at $10/$50 vs Sol), add it to thorough and keep the
 default where it is.
+
+The counterpoint: a new model that is both newer and cheaper than the current
+default's model takes the default, on its `-high` variant, but only once every
+account the provider serves can run it. Opus 5.5 qualified ($4/$20 over Opus 5 at
+$5/$25): the demoted entries stay as the previous generation under their explicit ids.
+The bare generation aliases (`opus`, `fable`) are separate from the default: they
+move to the newest generation at XHigh (step 5, item 4), not to the new default.
+GPT-6 Sol/Luna did not (2026-09-22): access was still rolling out and required
+Enterprise administrator enablement. The GPT-6.1 Sol update (2026-10-03) also
+keeps the new model opt-in: Enterprise and Edu administrators must enable it,
+and selecting it locally does not grant access. See
+[workspace model availability](https://learn.chatgpt.com/docs/enterprise/workspace-model-availability).
+Codex's `testAvailability()` only runs `codex --version`, and model rejection
+does not trigger a fallback, so an inaccessible default fails automatic analyses.
+Codex keeps `gpt-5.6-sol-high` as the default, `gpt-5.6-terra-xhigh` as the first
+balanced entry (provider-switch selection and resolver fallback), and
+`gpt-5.6-luna-low` as the first fast entry (JSON extraction and hunk summaries).
+GPT-6 and GPT-6.1 models remain explicit choices with access requirements in
+their descriptions. The same access bar applies to the first balanced and fast
+entries. GPT-5.5 retires from Codex on all plans on 2026-10-14; remove its entries
+then (the API is unaffected).
 
 ## Notes
 
@@ -215,3 +257,10 @@ default where it is.
   Note that the cached catalog marks the `-contributor` model with `is_default: true` —
   that is muse's own default, and pair-review overrides it on purpose. Do not copy the
   catalog's `is_default` across when refreshing the model list
+- Muse Wonder (2026-10-12) adds `muse-wonder-1.0` (API + Muse Code) and
+  `muse-wonder-full-1.0` (Muse Code Power/Maximum Usage subscriptions only, never the
+  API, and absent from the cached catalog). On an account without that plan the Full
+  id fails with ``does not exist or you lack access`` — that is a plan gate, not a dead
+  id, so do not remove it on that evidence alone. Wonder has no contributor model id;
+  its entries pass `--contributor-mode off` (verified accepted by muse 1.4.7) because
+  subscriptions default contributor mode on

@@ -624,6 +624,10 @@ class LocalManager {
 
       // Staleness is now checked in triggerAIAnalysis before showing config modal
 
+      // Clear existing AI suggestions from UI immediately when starting new
+      // analysis (same as PR mode's startAnalysis)
+      manager.clearFindingsForNewAnalysis();
+
       // Determine endpoint and body based on whether this is a council analysis
       let analyzeUrl, analyzeBody;
       if (config.isCouncil) {
@@ -1539,18 +1543,9 @@ class LocalManager {
       let totalDeletions = 0;
 
       for (const [fileName, patch] of filePatchMap) {
-        // Count additions and deletions
-        const lines = patch.split('\n');
-        let additions = 0;
-        let deletions = 0;
-
-        for (const line of lines) {
-          if (line.startsWith('+') && !line.startsWith('+++')) {
-            additions++;
-          } else if (line.startsWith('-') && !line.startsWith('---')) {
-            deletions++;
-          }
-        }
+        // Count hunk-body lines only: a removed `-- x` / added `++ x` line
+        // reads as `--- x` / `+++ x` and must still count.
+        const { additions, deletions } = window.HunkParser.countPatchStats(patch);
 
         const isGenerated = generatedFiles.has(fileName);
 

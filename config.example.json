@@ -7,7 +7,7 @@
   "port": 7247,
   "theme": "light",
   "default_provider": "claude",
-  "default_model": "opus",
+  "default_model": "opus-5.5-high",
   "_summaries_comment": "Configures the inline natural-language hunk-summary feature. enabled gates the feature entirely; auto_generate controls whether a summary job kicks off automatically on review load (false = require a manual click on the toolbar button). provider/model fall back to default_provider/default_model and the provider's fast-tier model. max_files/max_lines_added are perf caps that skip generation for overly large diffs.",
   "summaries": {
     "enabled": false,
@@ -17,7 +17,7 @@
     "max_files": 50,
     "max_lines_added": 3000
   },
-  "_tours_comment": "Configures the guided-tour feature. enabled gates the feature entirely; auto_generate controls whether a tour job kicks off automatically on review load (false = require a manual click on the toolbar button). provider/model fall back through summaries.provider, default_provider, and the provider's fast-tier model.",
+  "_tours_comment": "Configures the guided-tour feature. enabled gates the feature entirely; auto_generate controls whether a tour job kicks off automatically on review load (false = require a manual click on the toolbar button). provider falls back through summaries.provider, then default_provider. model falls back through summaries.model, then the provider's default model, then default_model.",
   "tours": {
     "enabled": false,
     "auto_generate": true,
@@ -95,15 +95,15 @@
     },
 
     "claude": {
-      "_comment": "Override Claude's built-in configuration. Useful for custom paths, wrapper scripts, or additional arguments. Built-in model IDs: fable-5.1-xhigh, fable-5.1-high, fable-5-xhigh, fable-5-high, opus-5-xhigh, opus-5-high, opus-4.8-xhigh, opus-4.8-high, opus-4.7-xhigh, opus-4.7-high, opus-4.6-high, sonnet-5-xhigh, sonnet-5-high, sonnet-4.6, opus-4.6-1m, and haiku ('opus' and 'fable' are convenience aliases for opus-4.8-xhigh and fable-5-xhigh). Use 'cli_model' to decouple the app-level model ID from the CLI --model argument. Use 'env' for model-specific environment variables. A model override only replaces the fields it names — 'cli_model', 'extra_args', and 'env' fall back to the built-in definition, so renaming a built-in keeps its effort settings for both analysis and chat. Set 'supports_chat': false on a model that only makes sense for analysis (it stays in the analysis picker but is hidden from the chat model picker).",
+      "_comment": "Override Claude's built-in configuration. Useful for custom paths, wrapper scripts, or additional arguments. Built-in model IDs: fable-5.1-xhigh, fable-5.1-high, fable-5-xhigh, fable-5-high, opus-5.5-xhigh, opus-5.5-high, opus-5.5-medium, opus-5.5-low, opus-5-xhigh, opus-5-high, sonnet-5-xhigh, sonnet-5-high, sonnet-4.6, and haiku ('opus' and 'fable' are convenience aliases for opus-5.5-xhigh and fable-5.1-xhigh; each tracks the newest generation at XHigh, so name an explicit id such as opus-5-xhigh to stay on an older one). Use 'cli_model' to decouple the app-level model ID from the CLI --model argument. Use 'env' for model-specific environment variables. A model override only replaces the fields it names — 'cli_model', 'extra_args', and 'env' fall back to the built-in definition, so renaming a built-in keeps its effort settings for both analysis and chat. Set 'supports_chat': false on a model that only makes sense for analysis (it stays in the analysis picker but is hidden from the chat model picker).",
       "_comment_default_model": "Provider-level 'default_model' selects which model is the default in the picker and when no model is specified. Preferred over the per-model 'default: true' flag (which is deprecated). If it names an unknown or disabled model, the provider falls back to automatic selection.",
-      "_comment_disabled_models": "'disabled_models' hides specific models (built-in or config-defined) from the picker for this provider. A list that would hide every model is ignored. disabled_models matches by model id or alias, so either a canonical id or a convenience alias works. Example below removes the fast-tier 'haiku' model and the thorough-tier Fable 5 model (named here by its 'fable' alias).",
+      "_comment_disabled_models": "'disabled_models' hides specific models (built-in or config-defined) from the picker for this provider. A list that would hide every model is ignored. disabled_models matches canonical model ids only; an alias such as 'fable' or 'opus' is ignored with a warning. Example below removes the fast-tier 'haiku' model and the thorough-tier Fable 5.1 XHigh model.",
       "command": "claude",
       "extra_args": [],
       "env": {},
       "installInstructions": "Install Claude CLI: npm install -g @anthropic-ai/claude-code",
-      "default_model": "opus",
-      "disabled_models": ["haiku", "fable"],
+      "default_model": "opus-5.5-high",
+      "disabled_models": ["haiku", "fable-5.1-xhigh"],
       "models": [
         {
           "_comment": "Example: simple override — customize the display name and description of a built-in model. Note: 'tier' is required even for overrides (valid values: fast, balanced, thorough, premium).",
@@ -174,7 +174,7 @@
     },
 
     "muse": {
-      "_comment": "Override Muse's built-in configuration. Muse drives Meta's 'muse' CLI (Muse Code) headlessly via 'muse exec --json'. Built-in model IDs: muse-spark-1.3-max, muse-spark-1.3-contributor-max, muse-spark-1.3-xhigh, muse-spark-1.3-contributor-xhigh, muse-spark-1.3-high (default; aliases 'muse-spark-1.3' and 'muse-spark'), muse-spark-1.3-contributor-high (alias 'muse-spark-1.3-contributor'), muse-spark-1.3-low, muse-spark-1.3-contributor-low. Every muse-spark-1.2-* id is an alias of its 1.3 twin (same price, better model), and the former -ultra ids alias to -max because 'ultra' is gate-closed and silently runs at xhigh. Each built-in maps to one of two real CLI models plus a --reasoning-effort level (minimal|low|medium|high|xhigh|max|ultra; 'none' is rejected). NOTE: the 'contributor' models are cheaper because Meta may use their content for product improvement; pair-review defaults to the non-contributor model so that tradeoff is always an explicit opt-in. Naming the bare CLI model 'muse-spark-1.3-contributor' resolves to the contributor variant, so it opts into that data sharing too. Run 'muse login' once to authenticate.",
+      "_comment": "Override Muse's built-in configuration. Muse drives Meta's 'muse' CLI (Muse Code) headlessly via 'muse exec --json'. Built-in model IDs: muse-wonder-1.0-high (alias 'muse-wonder-1.0'), muse-wonder-1.0-max, muse-wonder-full-1.0-high (alias 'muse-wonder-full-1.0'; requires a Muse Code Power Usage or Maximum Usage subscription), muse-wonder-full-1.0-max, muse-spark-1.3-max, muse-spark-1.3-contributor-max, muse-spark-1.3-xhigh, muse-spark-1.3-contributor-xhigh, muse-spark-1.3-high (default; aliases 'muse-spark-1.3' and 'muse-spark'), muse-spark-1.3-contributor-high (alias 'muse-spark-1.3-contributor'), muse-spark-1.3-low, muse-spark-1.3-contributor-low. Every muse-spark-1.2-* id is an alias of its 1.3 twin (same price, better model), and the former -ultra ids alias to -max because 'ultra' is gate-closed and silently runs at xhigh. Every Wonder built-in also passes '--contributor-mode off'. Each built-in maps to one of four real CLI models plus a --reasoning-effort level (minimal|low|medium|high|xhigh|max|ultra; 'none' is rejected). NOTE: the 'contributor' models are cheaper because Meta may use their content for product improvement; pair-review defaults to the non-contributor model so that tradeoff is always an explicit opt-in. Naming the bare CLI model 'muse-spark-1.3-contributor' resolves to the contributor variant, so it opts into that data sharing too. Run 'muse login' once to authenticate.",
       "command": "muse",
       "extra_args": [],
       "env": {},

@@ -5,7 +5,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const childProcess = require('child_process');
-const { deepMerge, getGitHubToken, expandPath, resolveDbName, warnIfDevModeWithoutDbName, loadConfig, shouldSkipUpdateNotifier, _resetTokenCache, getRepoConfig, getRepoPath, getRepoCheckoutScript, getRepoWorktreeDirectory, getRepoWorktreeNameTemplate, getRepoCheckoutTimeout, getRepoFetchTimeout, resolveRepoOptions, getRepoResetScript, getRepoSkipBulkFetch, getRepoPoolSize, getRepoPoolFetchInterval, resolvePoolConfig, getWorktreeDisplayName, getConfigDir, getRepoLoadSkills, resolveLoadSkills, buildCouncilProviderOverrides, getSummaryProvider, getSummaryModel, getTourProvider, getTourModel, getSummaryEnabled, getSummaryAutoGenerate, getTourEnabled, getTourAutoGenerate, resolveHostBinding, isExclusiveAltHost, invalidateTokenCache, validateRepoConfig, matchRepoByUrl, resolveBindingRepositoryFromPR } = require('../../src/config');
+const { deepMerge, getGitHubToken, expandPath, resolveDbName, warnIfDevModeWithoutDbName, loadConfig, shouldSkipUpdateNotifier, _resetTokenCache, getRepoConfig, getRepoPath, getRepoCheckoutScript, getRepoWorktreeDirectory, getRepoWorktreeNameTemplate, getRepoCheckoutTimeout, getRepoFetchTimeout, resolveRepoOptions, getRepoResetScript, getRepoSkipBulkFetch, getRepoCloneUrl, getRepoCloneUrlForHost, getRepoPoolSize, getRepoPoolFetchInterval, resolvePoolConfig, getWorktreeDisplayName, getConfigDir, getRepoLoadSkills, resolveLoadSkills, buildCouncilProviderOverrides, getSummaryProvider, getSummaryModel, getTourProvider, getTourModel, getSummaryEnabled, getSummaryAutoGenerate, getTourEnabled, getTourAutoGenerate, resolveHostBinding, isExclusiveAltHost, invalidateTokenCache, validateRepoConfig, matchRepoByUrl, resolveBindingRepositoryFromPR, DEFAULT_CONFIG } = require('../../src/config');
+const ClaudeProvider = require('../../src/ai/claude-provider');
+const { getEntry } = require('../../src/settings/registry');
 
 describe('config.js', () => {
   describe('getGitHubToken', () => {
@@ -1579,6 +1581,105 @@ describe('config.js', () => {
     });
   });
 
+  describe('getRepoCloneUrl', () => {
+    it('returns the configured clone URL', () => {
+      const config = {
+        repos: { 'owner/repo': { clone_url: 'https://althost.example/owner/repo.git' } }
+      };
+      expect(getRepoCloneUrl(config, 'owner/repo')).toBe('https://althost.example/owner/repo.git');
+    });
+
+    it('is case-insensitive on the repository key', () => {
+      const config = {
+        repos: { 'Owner/Repo': { clone_url: 'https://althost.example/Owner/Repo.git' } }
+      };
+      expect(getRepoCloneUrl(config, 'owner/repo')).toBe('https://althost.example/Owner/Repo.git');
+    });
+
+    it('returns null when not configured', () => {
+      expect(getRepoCloneUrl({ repos: { 'owner/repo': { path: '~/repo' } } }, 'owner/repo')).toBeNull();
+    });
+
+    it('returns null for an unconfigured repository', () => {
+      expect(getRepoCloneUrl({}, 'owner/repo')).toBeNull();
+    });
+
+    it('returns null for a missing config object', () => {
+      expect(getRepoCloneUrl(null, 'owner/repo')).toBeNull();
+    });
+
+    it('returns null for a non-string or empty value', () => {
+      expect(getRepoCloneUrl({ repos: { 'owner/repo': { clone_url: '' } } }, 'owner/repo')).toBeNull();
+      expect(getRepoCloneUrl({ repos: { 'owner/repo': { clone_url: 42 } } }, 'owner/repo')).toBeNull();
+    });
+  });
+
+  describe('getRepoCloneUrlForHost', () => {
+    const CLONE_URL = 'https://althost.example/owner/repo.git';
+
+    const plainRepo = { repos: { 'owner/repo': { clone_url: CLONE_URL } } };
+    const exclusiveRepo = {
+      repos: { 'owner/repo': { api_host: 'https://althost.example/api/v3', clone_url: CLONE_URL } }
+    };
+    const dualRepo = {
+      repos: {
+        'owner/repo': {
+          api_host: 'https://althost.example/api/v3',
+          exclusive: false,
+          clone_url: CLONE_URL
+        }
+      }
+    };
+
+    it('returns the configured URL for a plain github repo regardless of host', () => {
+      expect(getRepoCloneUrlForHost(plainRepo, 'owner/repo', undefined)).toBe(CLONE_URL);
+      expect(getRepoCloneUrlForHost(plainRepo, 'owner/repo', null)).toBe(CLONE_URL);
+    });
+
+    it('returns the configured URL for an exclusive alt-host repo', () => {
+      // An exclusive repo has no github.com presence, so the URL always applies —
+      // including under the ambiguity rule, which binds such a repo to its alt host.
+      expect(getRepoCloneUrlForHost(exclusiveRepo, 'owner/repo', undefined)).toBe(CLONE_URL);
+      expect(getRepoCloneUrlForHost(exclusiveRepo, 'owner/repo', 'https://althost.example/api/v3'))
+        .toBe(CLONE_URL);
+    });
+
+    it('returns the configured URL for a dual repo bound to its alt host', () => {
+      expect(getRepoCloneUrlForHost(dualRepo, 'owner/repo', 'https://althost.example/api/v3'))
+        .toBe(CLONE_URL);
+    });
+
+    it('returns null for a dual repo bound to github.com', () => {
+      // Mirrors resolveHostBinding's isDualGithubBinding guard: `clone_url`
+      // describes the ALT host, and github.com reports its own correct value.
+      expect(getRepoCloneUrlForHost(dualRepo, 'owner/repo', null)).toBeNull();
+    });
+
+    it('returns null for a dual repo whose host is unknown (ambiguity rule → github.com)', () => {
+      expect(getRepoCloneUrlForHost(dualRepo, 'owner/repo', undefined)).toBeNull();
+    });
+
+    it('returns null when no clone_url is configured', () => {
+      const noUrl = { repos: { 'owner/repo': { api_host: 'https://althost.example/api/v3' } } };
+      expect(getRepoCloneUrlForHost(noUrl, 'owner/repo', undefined)).toBeNull();
+      expect(getRepoCloneUrlForHost({}, 'owner/repo', undefined)).toBeNull();
+      expect(getRepoCloneUrlForHost(null, 'owner/repo', undefined)).toBeNull();
+    });
+
+    it('does not throw for a github.com host on an exclusive alt-host repo', () => {
+      // resolveHostBinding treats this as a caller bug and throws; this helper is
+      // advisory, so it must stay quiet. The repo has no github.com presence, so
+      // its configured URL is still the only one that could apply.
+      expect(() => getRepoCloneUrlForHost(exclusiveRepo, 'owner/repo', null)).not.toThrow();
+      expect(getRepoCloneUrlForHost(exclusiveRepo, 'owner/repo', null)).toBe(CLONE_URL);
+    });
+
+    it('is case-insensitive on the repository key', () => {
+      const config = { repos: { 'Owner/Repo': { clone_url: CLONE_URL } } };
+      expect(getRepoCloneUrlForHost(config, 'owner/repo', undefined)).toBe(CLONE_URL);
+    });
+  });
+
   describe('getRepoFetchTimeout', () => {
     it('returns the configured value converted to milliseconds', () => {
       const config = {
@@ -2063,7 +2164,7 @@ describe('config.js', () => {
 
     it('falls back to DEFAULT_CONFIG.default_model when neither is set', () => {
       const config = {};
-      expect(getSummaryModel(config)).toBe('opus');
+      expect(getSummaryModel(config)).toBe(DEFAULT_CONFIG.default_model);
     });
 
     // The global default_model pairs with default_provider. A summary provider
@@ -2133,28 +2234,81 @@ describe('config.js', () => {
   });
 
   describe('getTourModel', () => {
-    it('returns tours.model when set', () => {
-      const config = { tours: { model: 'opus' }, summaries: { model: 'haiku' }, default_model: 'sonnet' };
-      expect(getTourModel(config)).toBe('opus');
-    });
-
-    it('falls back to summaries.model when tours.model empty', () => {
-      const config = { tours: { model: '' }, summaries: { model: 'haiku' }, default_model: 'sonnet' };
-      expect(getTourModel(config)).toBe('haiku');
-    });
-
-    it('falls back to providerClass fast-tier when both empty', () => {
-      const config = { tours: { model: '' }, summaries: { model: '' }, default_model: 'opus' };
-      const FakeProvider = { getModels: () => [
+    // A provider with both a fast tier and a built-in default, so each test
+    // can tell which rung answered.
+    const FakeProvider = {
+      getProviderId: () => 'fake',
+      getDefaultModel: () => 'big',
+      getModels: () => [
         { id: 'big', tier: 'thorough' },
         { id: 'small', tier: 'fast' }
-      ]};
-      expect(getTourModel(config, FakeProvider)).toBe('small');
+      ]
+    };
+
+    it('returns tours.model over everything else', () => {
+      const config = { tours: { model: 'opus' }, summaries: { model: 'haiku' }, default_model: 'sonnet' };
+      expect(getTourModel(config, FakeProvider)).toBe('opus');
     });
 
-    it('falls back to default_model when nothing matches', () => {
+    it('falls back to summaries.model when tours.model is empty', () => {
+      const config = { tours: { model: '' }, summaries: { model: 'haiku' }, default_model: 'sonnet' };
+      expect(getTourModel(config, FakeProvider)).toBe('haiku');
+    });
+
+    it('uses the provider default, not its fast tier, when both models are empty', () => {
+      const config = { tours: { model: '' }, summaries: { model: '' }, default_model: 'opus' };
+      expect(getTourModel(config, FakeProvider)).toBe('big');
+    });
+
+    // An existing config still carries the stock global default_model it was
+    // written with; the tour uses the provider's built-in default instead.
+    it('uses the provider default even when the tour provider is the global default provider', () => {
+      const config = { default_provider: 'fake', default_model: 'opus' };
+      expect(getTourModel(config, FakeProvider)).toBe('big');
+    });
+
+    it('falls back to default_model when the provider has no default (null)', () => {
+      const config = { default_provider: 'claude', default_model: 'opus' };
+      const FakeOpenCode = {
+        getProviderId: () => 'opencode',
+        getDefaultModel: () => null,
+        getModels: () => []
+      };
+      expect(getTourModel(config, FakeOpenCode)).toBe('opus');
+    });
+
+    it('falls back to default_model when the provider class lacks getDefaultModel', () => {
+      const config = { default_model: 'opus' };
+      const Bare = { getModels: () => [{ id: 'small', tier: 'fast' }] };
+      expect(getTourModel(config, Bare)).toBe('opus');
+    });
+
+    it('falls back to default_model when no providerClass is given', () => {
       const config = { default_model: 'opus' };
       expect(getTourModel(config)).toBe('opus');
+    });
+
+    it('falls back to DEFAULT_CONFIG.default_model when nothing is set', () => {
+      expect(getTourModel({})).toBe(DEFAULT_CONFIG.default_model);
+    });
+
+    it("resolves the real Claude provider's built-in default", () => {
+      expect(getTourModel({ default_model: 'opus' }, ClaudeProvider)).toBe(ClaudeProvider.getDefaultModel());
+    });
+  });
+
+  describe('DEFAULT_CONFIG.default_model', () => {
+    // New installs get DEFAULT_CONFIG written to ~/.pair-review/config.json, so
+    // the global default_model rung always outranks the provider default. Pin
+    // it to Claude's built-in default (the default provider) so a future
+    // default change cannot update one and miss the other.
+    it("matches the default provider's built-in default model", () => {
+      expect(DEFAULT_CONFIG.default_provider).toBe(ClaudeProvider.getProviderId());
+      expect(DEFAULT_CONFIG.default_model).toBe(ClaudeProvider.getDefaultModel());
+    });
+
+    it('matches the settings registry default', () => {
+      expect(getEntry('default_model').default).toBe(DEFAULT_CONFIG.default_model);
     });
   });
 
@@ -2449,6 +2603,101 @@ describe('config.js', () => {
       const binding = resolveHostBinding('owner/repo', { repos: { 'owner/repo': {} } });
       expect(binding.token).toBe('');
       expect(binding.source).toBe('none');
+    });
+
+    describe('cloneUrl', () => {
+      it('is null when the repo configures no clone_url', () => {
+        const binding = resolveHostBinding('owner/repo', {
+          github_token: 'top',
+          repos: { 'owner/repo': { path: '/tmp/x' } }
+        });
+        expect(binding.cloneUrl).toBeNull();
+      });
+
+      it('is null for the no-repo fallback', () => {
+        expect(resolveHostBinding(null, { github_token: 'top' }).cloneUrl).toBeNull();
+      });
+
+      it('carries the configured clone_url on an alt-host binding', () => {
+        const binding = resolveHostBinding('owner/alt', {
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              token: 'alt-token',
+              clone_url: 'https://althost.example/owner/alt.git'
+            }
+          }
+        });
+        expect(binding.apiHost).toBe('https://althost.example/api/v3');
+        expect(binding.cloneUrl).toBe('https://althost.example/owner/alt.git');
+      });
+
+      it('carries the configured clone_url on a plain github.com binding', () => {
+        const binding = resolveHostBinding('owner/repo', {
+          github_token: 'top',
+          repos: { 'owner/repo': { clone_url: 'https://mirror.example/owner/repo.git' } }
+        });
+        expect(binding.apiHost).toBeNull();
+        expect(binding.cloneUrl).toBe('https://mirror.example/owner/repo.git');
+      });
+
+      it('carries the configured clone_url on a token_command binding', () => {
+        execSyncSpy.mockReturnValueOnce('alt-cmd-token\n');
+        const binding = resolveHostBinding('owner/alt', {
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              token_command: 'echo ALT',
+              clone_url: 'https://althost.example/owner/alt.git'
+            }
+          }
+        });
+        expect(binding.source).toBe('repo:token_command');
+        expect(binding.cloneUrl).toBe('https://althost.example/owner/alt.git');
+      });
+
+      it('is null when no token resolves at all (source "none")', () => {
+        const binding = resolveHostBinding('owner/alt', {
+          repos: {
+            'owner/alt': {
+              api_host: 'https://althost.example/api/v3',
+              clone_url: 'https://althost.example/owner/alt.git'
+            }
+          }
+        });
+        expect(binding.source).toBe('none');
+        // Even the no-token return carries the field.
+        expect(binding.cloneUrl).toBe('https://althost.example/owner/alt.git');
+      });
+
+      it('is null for the github.com binding of a DUAL repo', () => {
+        const config = {
+          github_token: 'top-gh',
+          repos: {
+            'owner/dual': {
+              api_host: 'https://althost.example/api/v3',
+              exclusive: false,
+              token: 'alt-token',
+              clone_url: 'https://althost.example/owner/dual.git'
+            }
+          }
+        };
+        // Alt flavor keeps it...
+        expect(resolveHostBinding('owner/dual', config, { host: 'https://althost.example/api/v3' }).cloneUrl)
+          .toBe('https://althost.example/owner/dual.git');
+        // ...the github.com flavor does not (mirrors how `features` are excluded).
+        const githubBinding = resolveHostBinding('owner/dual', config, { host: null });
+        expect(githubBinding.apiHost).toBeNull();
+        expect(githubBinding.cloneUrl).toBeNull();
+      });
+
+      it('ignores an empty-string clone_url', () => {
+        const binding = resolveHostBinding('owner/repo', {
+          github_token: 'top',
+          repos: { 'owner/repo': { clone_url: '' } }
+        });
+        expect(binding.cloneUrl).toBeNull();
+      });
     });
 
     describe('alt-host token isolation (Fix #4)', () => {
@@ -3132,6 +3381,39 @@ describe('config.js', () => {
             git_remote_pattern: '^git@althost\\.example:scm/owner/repo(\\.git)?$'
           }
         }
+      })).not.toThrow();
+    });
+
+    it('accepts a clone_url string', () => {
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { clone_url: 'https://althost.example/owner/repo.git' } }
+      })).not.toThrow();
+    });
+
+    it('accepts an omitted or null clone_url', () => {
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { path: '~/repo' } }
+      })).not.toThrow();
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { clone_url: null } }
+      })).not.toThrow();
+    });
+
+    it('throws when clone_url is not a string', () => {
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { clone_url: 123 } }
+      })).toThrow(/repos\["owner\/repo"\]\.clone_url must be a non-empty string/);
+    });
+
+    it('throws when clone_url is an empty string', () => {
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { clone_url: '' } }
+      })).toThrow(/repos\["owner\/repo"\]\.clone_url must be a non-empty string/);
+    });
+
+    it('accepts clone_url without api_host (github.com repo behind a mirror)', () => {
+      expect(() => validateRepoConfig({
+        repos: { 'owner/repo': { clone_url: 'https://mirror.example/owner/repo.git' } }
       })).not.toThrow();
     });
 

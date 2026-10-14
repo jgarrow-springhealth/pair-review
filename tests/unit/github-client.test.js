@@ -284,6 +284,7 @@ describe('GitHubClient', () => {
       const mutationString = commentMutationCall[0];
 
       expect(mutationString).toContain('startLine: 10');
+      expect(mutationString).toContain('startSide: RIGHT');
       expect(mutationString).toContain('line: 15');
       expect(mutationString).toContain('side: RIGHT');
     });
@@ -325,6 +326,7 @@ describe('GitHubClient', () => {
       const mutationString = commentMutationCall[0];
 
       expect(mutationString).not.toContain('startLine');
+      expect(mutationString).not.toContain('startSide');
       expect(mutationString).toContain('line: 42');
     });
   });
@@ -811,6 +813,7 @@ describe('GitHubClient', () => {
       const mutationString = commentMutationCall[0];
 
       expect(mutationString).toContain('startLine: 20');
+      expect(mutationString).toContain('startSide: RIGHT');
       expect(mutationString).toContain('line: 30');
     });
 
@@ -841,6 +844,7 @@ describe('GitHubClient', () => {
       const mutationString = commentMutationCall[0];
 
       expect(mutationString).not.toContain('startLine');
+      expect(mutationString).not.toContain('startSide');
       expect(mutationString).toContain('line: 50');
     });
   });
@@ -1298,57 +1302,6 @@ describe('GitHubClient', () => {
     });
   });
 
-  describe('calculateDiffPosition', () => {
-    it('should return -1 for missing parameters', () => {
-      const client = new GitHubClient('test-token');
-      expect(client.calculateDiffPosition(null, 'file.js', 10)).toBe(-1);
-      expect(client.calculateDiffPosition('diff', null, 10)).toBe(-1);
-      expect(client.calculateDiffPosition('diff', 'file.js', undefined)).toBe(-1);
-    });
-
-    it('should calculate position for added lines', () => {
-      const client = new GitHubClient('test-token');
-      const diff = `diff --git a/file.js b/file.js
---- a/file.js
-+++ b/file.js
-@@ -1,3 +1,4 @@
-+// New comment
- line1
- line2
- line3`;
-
-      // Line 1 in new file is the added line, which is position 1 (first line after hunk header)
-      expect(client.calculateDiffPosition(diff, 'file.js', 1)).toBe(1);
-    });
-
-    it('should return -1 for lines not in diff', () => {
-      const client = new GitHubClient('test-token');
-      const diff = `diff --git a/file.js b/file.js
---- a/file.js
-+++ b/file.js
-@@ -1,3 +1,3 @@
- line1
- line2
- line3`;
-
-      // Line 100 is not in the diff
-      expect(client.calculateDiffPosition(diff, 'file.js', 100)).toBe(-1);
-    });
-
-    it('should return -1 for non-existent file', () => {
-      const client = new GitHubClient('test-token');
-      const diff = `diff --git a/file.js b/file.js
---- a/file.js
-+++ b/file.js
-@@ -1,3 +1,3 @@
- line1
- line2
- line3`;
-
-      expect(client.calculateDiffPosition(diff, 'other-file.js', 1)).toBe(-1);
-    });
-  });
-
   describe('getPendingReviewForUser', () => {
     it('should return the pending review authored by the viewer', async () => {
       const client = new GitHubClient('test-token');
@@ -1655,6 +1608,123 @@ describe('GitHubClient', () => {
       const result = await client.getReviewById('PRR_dismissed');
 
       expect(result.state).toBe('DISMISSED');
+    });
+  });
+
+  describe('fetchPullRequest', () => {
+    // Minimal REST `pulls.get` payload. `base.repo` is present here; the
+    // absent-`base.repo` case is covered separately below.
+    const restPayload = (overrides = {}) => ({
+      number: 7,
+      node_id: 'PR_kwDO123',
+      title: 'A title',
+      body: 'A body',
+      user: { login: 'octocat' },
+      state: 'open',
+      merged: false,
+      base: {
+        ref: 'main',
+        sha: 'basesha',
+        repo: {
+          full_name: 'owner/repo',
+          clone_url: 'https://github.com/owner/repo.git',
+          ssh_url: 'git@github.com:owner/repo.git',
+          default_branch: 'main'
+        }
+      },
+      head: { ref: 'feature', sha: 'headsha' },
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-02T00:00:00Z',
+      additions: 1,
+      deletions: 0,
+      changed_files: 1,
+      mergeable: true,
+      mergeable_state: 'clean',
+      html_url: 'https://github.com/owner/repo/pull/7',
+      ...overrides
+    });
+
+    /** Stub `octokit.rest.pulls.get` on a client with the supplied payload. */
+    function stubPullsGet(client, data) {
+      const get = vi.fn().mockResolvedValue({ data });
+      // Replace the whole `rest` namespace: the real one is a lazy proxy that
+      // throws when spread.
+      client.octokit.rest = { pulls: { get } };
+      return get;
+    }
+
+    const ALT_BINDING = {
+      token: 'alt-token',
+      apiHost: 'https://althost.example/api/v3',
+      cloneUrl: 'https://althost.example/owner/repo.git'
+    };
+
+    it('leaves the API clone_url untouched for a plain-token client', async () => {
+      const client = new GitHubClient('test-token');
+      stubPullsGet(client, restPayload());
+
+      const result = await client.fetchPullRequest('owner', 'repo', 7);
+
+      expect(client.cloneUrl).toBeNull();
+      expect(result.repository).toEqual({
+        full_name: 'owner/repo',
+        clone_url: 'https://github.com/owner/repo.git',
+        ssh_url: 'git@github.com:owner/repo.git',
+        default_branch: 'main'
+      });
+    });
+
+    it('lets a configured cloneUrl override the API value', async () => {
+      const client = new GitHubClient(ALT_BINDING);
+      stubPullsGet(client, restPayload());
+
+      const result = await client.fetchPullRequest('owner', 'repo', 7);
+
+      expect(result.repository.clone_url).toBe('https://althost.example/owner/repo.git');
+      // Other repository fields still come from the API.
+      expect(result.repository.ssh_url).toBe('git@github.com:owner/repo.git');
+      expect(result.repository.default_branch).toBe('main');
+    });
+
+    it('fills in clone_url when the host omits base.repo.clone_url', async () => {
+      const client = new GitHubClient(ALT_BINDING);
+      stubPullsGet(client, restPayload({
+        base: {
+          ref: 'main',
+          sha: 'basesha',
+          repo: { full_name: 'owner/repo', ssh_url: '', default_branch: 'trunk' }
+        }
+      }));
+
+      const result = await client.fetchPullRequest('owner', 'repo', 7);
+
+      expect(result.repository.clone_url).toBe('https://althost.example/owner/repo.git');
+      expect(result.repository.default_branch).toBe('trunk');
+    });
+
+    it('does not throw when the host omits base.repo entirely', async () => {
+      const client = new GitHubClient(ALT_BINDING);
+      stubPullsGet(client, restPayload({ base: { ref: 'main', sha: 'basesha' } }));
+
+      const result = await client.fetchPullRequest('owner', 'repo', 7);
+
+      expect(result.repository).toEqual({
+        full_name: 'owner/repo',
+        clone_url: 'https://althost.example/owner/repo.git',
+        ssh_url: undefined,
+        default_branch: undefined
+      });
+      expect(result.base_branch).toBe('main');
+    });
+
+    it('falls back to owner/repo for full_name and leaves clone_url undefined with no binding value', async () => {
+      const client = new GitHubClient('test-token');
+      stubPullsGet(client, restPayload({ base: { ref: 'main', sha: 'basesha' } }));
+
+      const result = await client.fetchPullRequest('acme', 'widget', 7);
+
+      expect(result.repository.full_name).toBe('acme/widget');
+      expect(result.repository.clone_url).toBeUndefined();
     });
   });
 

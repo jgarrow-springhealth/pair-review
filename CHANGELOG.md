@@ -1,5 +1,158 @@
 # Changelog
 
+## 5.3.4
+
+### Patch Changes
+
+- 895d7f0: Add GPT-6.1 Sol High and XHigh as explicit choices in the Codex provider for reviews and chat. Keep GPT-5.6 Sol High as the recommended default during rollout, and update model descriptions and badges to reflect the current CLI catalog and workspace access requirements.
+
+## 5.3.3
+
+### Patch Changes
+
+- 3a25c85: Fix OMP chat going silent mid-reply until the page is refreshed
+
+  - OMP sends a non-terminal `agent_end` when it pauses for a background job, a queued advisor
+    steer, or a compaction/retry continuation, and then picks the turn back up on its own. Chat
+    treated that pause as the end of the reply. It saved a partial answer, closed the bubble,
+    and dropped the rest of the reply. The input also stopped taking messages. Chat now waits
+    for the terminal `agent_end` and saves the whole reply as one message.
+  - A message sent while OMP is paused (for example from a page reloaded mid-reply) is now
+    rejected with an explanation, and its text goes back into the input. Before, it started a
+    new turn and the paused reply was lost. The chat then shows the reply in progress with a
+    Stop button, and the full reply once it finishes. Clicking Stop during a pause ends the
+    reply and saves what OMP wrote so far. That text is also saved if OMP exits, or the chat
+    tab or server is closed, during a pause.
+  - Output from a turn the agent starts on its own, such as an OMP advisor waking it after a
+    reply finished, now opens a new chat bubble instead of disappearing. Output still in
+    flight after you click Stop is dropped as before. Opening that bubble no longer scrolls
+    you to the bottom if you scrolled up.
+  - A reply that was already under way when the page loaded now shows in full once it
+    finishes, below the loaded history, instead of only the part streamed after the load, or
+    nothing at all when none of it streamed to the page.
+  - OMP `notice` events are now logged at their level (warnings and errors show in the server
+    log). OMP status-line events such as `advisor_yielded` are no longer logged as
+    "Unhandled event type".
+
+- 02fc02d: Add Opus 5.5 Medium (balanced tier) and Opus 5.5 Low (fast tier) to the Claude provider, and drop the Opus 4.x models. Saved configs that name an Opus 4.x id (e.g. `opus-4.8-xhigh`, `opus-4.6-high`, `opus-4.6-1m`) now resolve to the Opus 5.5 model at the matching effort.
+
+  `disabled_models` now matches canonical model ids only. An alias entry (such as `opus`, `fable`, or a retired id like `opus-4.7-high`) is ignored with a warning instead of hiding the model it points to, so a list that hid an old Opus 4.x model no longer hides the Opus 5.5 model that inherited its id. If you disabled a model by alias, list its canonical id instead (e.g. `opus-5.5-xhigh` rather than `opus`).
+
+## 5.3.2
+
+### Patch Changes
+
+- fdb92ad: Add Claude Opus 5.5 models (`opus-5.5-xhigh`, `opus-5.5-high`) and make `opus-5.5-high` the default for new installs
+
+  The bare `opus` alias now resolves to Opus 5.5 XHigh (was Opus 4.8 XHigh), and `fable`
+  resolves to Fable 5.1 XHigh (was Fable 5 XHigh). Any config, council, `--model`, or
+  `disabled_models` entry that names an alias follows it. That includes the stock
+  `"default_model": "opus"` that earlier versions wrote to `~/.pair-review/config.json`.
+  To stay on the previous generation, name `opus-4.8-xhigh` or `fable-5-xhigh` explicitly.
+
+  Requires a Claude Code CLI that recognizes `claude-opus-5-5`. Use a per-model
+  `cli_model` override if you need a different ID.
+
+- fdb92ad: Add GPT-6 Sol and GPT-6 Luna models to the Codex provider and replace the retired `gpt-5.4-mini`
+
+  - GPT-6 Sol (`gpt-6-sol-high`, `gpt-6-sol-xhigh`) and GPT-6 Luna (`gpt-6-luna-max`,
+    `gpt-6-luna-low`) can now be picked. OpenAI is still rolling out GPT-6 access, and
+    Enterprise workspace admins must enable it, so these entries are opt-in.
+  - The Codex default stays `gpt-5.6-sol-high` so default analyses keep working for
+    accounts without GPT-6 access.
+  - JSON extraction and hunk summaries now run on `gpt-5.6-luna-low` instead of
+    `gpt-5.4-mini`. OpenAI retired `gpt-5.4-mini` for ChatGPT sign-in on 2026-08-31,
+    and Codex has rejected it with a 400 since then, so extraction failed for ChatGPT
+    users.
+  - `gpt-5.4-mini` is removed with no alias. API-key users can still name it directly
+    (`--model gpt-5.4-mini`) or add it under `providers.codex.models`.
+  - The GPT-5.5 entries remain for now; OpenAI retires GPT-5.5 from Codex on 2026-10-14.
+
+- fdb92ad: Guided tours now use the tour provider's default model instead of its fast-tier model
+
+  A tour is an agentic walk through the codebase, so the fast tier was a poor fit.
+  When neither `tours.model` nor `summaries.model` is set, tour generation now uses the
+  tour provider's built-in default model (for Claude, `opus-5.5-high` instead of
+  `haiku`). This applies to every provider with a built-in default: Claude, Codex,
+  Antigravity, Copilot, Cursor Agent, Muse, Pi, and OMP. For Pi and OMP this is their
+  `default` mode, which uses your Pi or OMP configuration, even when Pi or OMP is the
+  global `default_provider` and a different `default_model` is set. OpenCode has no
+  built-in default and still falls back to the global `default_model`.
+
+  The provider default is used even when the tour provider is the global
+  `default_provider`, so an existing config's saved `default_model` does not decide
+  the tour model. The lookup reads the provider's built-in model list, so
+  `providers.<id>.default_model` does not change it; set `tours.model` to pick a
+  specific model. For Claude, `opus-5.5-high` needs a Claude Code CLI that knows
+  `claude-opus-5-5` (2.1.280 or later); on an older CLI, tours fail until you update
+  the CLI or set `tours.model`. Hunk summaries are unchanged and still use the fast tier.
+
+  Tours are off by default. If you enabled them, `tours.auto_generate` is on by
+  default, so each review load now runs a tour on the default model, which costs
+  more and takes longer than the fast tier did.
+
+- 3a22f4d: Upgrade the bundled markdown renderer to markdown-it 14.3.2 to fix a linkify denial-of-service
+
+  markdown-it 13.0.2 bundled `linkify-it` 4.x, whose link matcher has quadratic
+  cost (CVE-2026-48801 / GHSA-22p9-wv53-3rq4): a comment or suggestion containing
+  tens of kilobytes of email-like text could freeze the review page for seconds
+  while it rendered. The PR and Local review pages now load markdown-it 14.3.2,
+  which bundles the fixed `linkify-it` 5.0.2. `markdown-it` moved to
+  `devDependencies`, since the browser loads it from the CDN and only the unit
+  tests use the npm copy.
+
+## 5.3.1
+
+### Patch Changes
+
+- 51d1fdb: Add a per-repo `clone_url` config option
+
+  `repos["owner/repo"].clone_url` declares the canonical git clone URL for a
+  repository. It is primarily for alternate hosts whose GitHub-compatible REST
+  API omits `base.repo.clone_url` from the pull request response — without it,
+  pair-review fell back to `https://github.com/<owner>/<repo>.git`, which
+  matched the wrong local remote when fetching the PR and cloned from github.com
+  when no local checkout existed.
+
+  When set, the configured value wins over the API's `base.repo.clone_url`, is
+  matched against the local checkout's `git remote -v` entries to pick the fetch
+  remote, and is the URL used for a fresh clone. Remote resolution now tries the
+  clone URL against every remote before falling back to matching the PR's
+  `ssh_url`, so a remote matching the API's SSH URL can no longer outrank the
+  configured one. Restore mode (reopening a stored review, which never calls the
+  API) applies the configured URL to the stored snapshot before setup, so both
+  the clone and the remote choice pick it up; for a dual-host repo the
+  github.com side is left alone, as with `features`. `fetchPullRequest` now
+  tolerates a pull request response with no `base.repo` block at all.
+
+- c513082: Fix worktree remote resolution on partial clones. `git remote -v` appends the object filter (e.g. `[blob:none]`) to a partial-clone remote's fetch line, which caused those remotes to be ignored when matching the PR's base repository. The fallback then fetched from an unrelated remote that might not carry the PR's objects.
+
+## 5.3.0
+
+### Minor Changes
+
+- 953b5e4: Add a model picker to the chat panel, fed by the same per-provider model catalog used for AI review analysis (`providers.<id>.models` and `disabled_models` apply; `default_model` is the analysis default and does not move the chat picker — set `chat_providers.<id>.model` for that). The model is chosen before the first message; picking a different model on a conversation that already has messages opens a new tab after a one-time "Start a new conversation?" dialog with a "Don't ask again" checkbox — pair-review does not switch models mid-conversation, by design.
+
+  The last model you pick for a chat provider is remembered in that browser (`localStorage`, one key per provider, not per review) and seeds the model of every new conversation on that provider — including the tab opened by a provider switch. Picking "Provider default" is remembered too (it clears the key). A remembered model that is no longer in the provider's catalog is discarded silently, and restored, resumed or server-resolved models never overwrite the preference — only an explicit pick does.
+
+  New `chat_providers.<id>.models_from` config key selects which review provider's catalog backs a chat provider's picker (built-in mapping: `copilot-acp`->`copilot`, `opencode-acp`->`opencode`, `cursor-acp`->`cursor-agent`, others use their own id; config-defined providers fall back to `type`).
+
+  `chat.started` and `chat.resumed` hook payloads gain a `cli_model` field (the exact model string handed to the CLI). Note: `model` in those payloads now carries the canonical catalog id rather than the raw selector whenever the selector matches a catalog entry — including when `chat_providers.<id>.model` names a model by alias. Hook scripts comparing against a raw CLI model string should switch to `cli_model`.
+
+  Model catalog entries gain `supports_chat` (default `true`). Pi's analysis-only `multi-model` and `review-roulette` pseudo-models set it to `false`, so they no longer appear in the chat picker or inject their review-skill arguments into a conversation. Catalog rows that mean "provider default" (no CLI model, flags, or env — Pi's and OMP's `default` entries) are also hidden from the chat picker, which already offers its own "Provider default" row.
+
+  Fixed: a partial `providers.<id>.models` override (e.g. renaming `opus-5-high`) no longer strips `cli_model`, `extra_args`, and `env` from a chat session — chat now resolves those fields against the built-in definition and the override separately, exactly as analysis does. `chat_providers.claude.args` / `extra_args` are now actually passed to the Claude chat CLI (they were silently dropped), appended after the generated flags as they are for `pi` and `omp`. The chat session create/resume responses and the session list now carry the canonical `model` id.
+
+- 9815da0: Redesign the Thorough-tier review prompts for frontier reasoning models. All five thorough prompts (Level 1-3, orchestration, consolidation) now require a verification standard — bug findings must state a concrete failure scenario and survive a refutation attempt before being reported, where discarding requires positive refutation evidence: a concrete scenario the reviewer can neither confirm nor refute surfaces as a low-confidence question rather than being silently dropped — and carry an explicit do-not-report list to suppress false positives. Category-definition tutoring and reasoning-encouragement boilerplate are removed, focus areas are compressed into prioritized hunting lists, confidence has one unified meaning across the pipeline (probability the finding is real, set by verification performed, no score arithmetic), Level 1's contradictory scope instructions are resolved, Level 2 treats file conventions as evidence rather than authority, and orchestration scales output to the PR instead of targeting a fixed suggestion count. Security is listed first in every hunt list, and security findings are reported as attack scenarios — who can exploit it, how, and what they gain, with the code-level fix in the suggestion field — with a hardening lane for issues that lack a current attack path; orchestration and consolidation preserve the exploit framing when merging. Over-engineering (single-use abstractions, speculative generality, duplicate mechanisms) is an explicit hunting target at every level, gated by a falsifiability bar: simplicity findings must sketch the concrete simpler equivalent or be dropped as style preference. The thorough tier additionally performs an adversarial verification pass at the final merge stage of every analysis flow — cross-level orchestration for single-reviewer and level-centric council runs, cross-voice consolidation for reviewer-centric councils: the merging model takes a fresh, skeptical look at the collected findings with read-only repository access, dropping findings it can concretely refute against the code (misread claims, existing defenses) while keeping unverifiable findings at their original confidence. Refutation requires evidence, code evidence outranks consensus, and verification runs exactly once per flow, at the point where overlap and conflict between sources are fully visible as evidence.
+
+### Patch Changes
+
+- 9815da0: Harden thorough-tier reviews against narration-prefixed output, and raise the LLM JSON-extraction fallback timeout from 60 seconds to 5 minutes. Every thorough template (Levels 1-3, orchestration, consolidation) now closes with a reply-shape guard — the reply is the JSON object alone, its first character `{` — since agentic models can narrate their process ahead of the JSON and break extraction. The guard deliberately does not quote an example of the forbidden preamble: an earlier version did, and eval showed the model emitting the quoted sentence near-verbatim. The extraction timeout raise keeps large (100KB+) analyses recoverable instead of discarding them mid-extraction; the Antigravity extraction budget (`--print-timeout`) moves in step so agy still self-terminates just before the outer cap, and the Antigravity analysis directive now defers access rules to the task instructions instead of hardcoding its own.
+- 558a93f: Enable OMP's built-in `task` subagent tool for both AI review analysis and chat. OMP only loads tools listed in `--tools`, so omitting `task` silently prevented OMP from delegating exploration to subagents. Also fixes chat task badges whose spinner kept running until turn end when the provider reports the tool as lowercase `task`, and shows a summary of OMP's `tasks[]` input in the tool progress line instead of a bare tool name.
+- 3ab8b6e: Fix invisible inline suggestions and comments outside diff hunks in PR and local reviews: correctly detect visible context, preserve expanded context across feedback refreshes, and reveal both ends of a range when navigating from the sidebar. Prevent older navigation requests from scrolling over a newer selection while lines are expanding.
+
+  Wait for asynchronously rendered suggestion and comment boxes before finishing navigation, so delayed diff painting cannot leave the selected feedback outside the viewport.
+
 ## 5.2.3
 
 ### Patch Changes

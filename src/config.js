@@ -68,12 +68,12 @@ const DEFAULT_CONFIG = {
   single_port: true,  // When true, reuse a single server on the configured port; new invocations delegate to the running server
   theme: "light",
   default_provider: "claude",  // AI provider: 'claude', 'antigravity', 'codex', 'copilot', 'opencode', 'cursor-agent', 'pi', 'omp', 'muse'
-  default_model: "opus",       // Model within the provider (e.g., 'opus' for Claude, 'gemini-3.8-flash-high' for Antigravity)
+  default_model: "opus-5.5-high",  // Model within the provider (e.g., 'opus-5.5-high' for Claude, 'gemini-3.8-flash-high' for Antigravity)
   tours: {
     enabled: false,            // When true, the guided-tour feature is available (toolbar button visible, etc.)
     auto_generate: true,       // When true, a tour generation job is kicked off automatically on review load
     provider: "",              // Provider for agentic tour generation. Empty = falls back to summaries.provider, then default_provider
-    model: ""                  // Model for tour generation. Empty = falls back to summaries.model resolution
+    model: ""                  // Model for tour generation. Empty = uses summaries.model, then the provider's default model, then default_model
   },
   summaries: {
     enabled: false,            // When true, the hunk-summaries feature is available (toolbar button + per-file toggles visible)
@@ -233,7 +233,7 @@ function getSummaryProvider(config) {
 }
 
 /**
- * Gets the summary model for summary/tour generation
+ * Gets the model for hunk-summary generation
  * Resolution order: summaries.model → providerClass fast-tier → provider
  * default (when the summary provider differs from the global default
  * provider) → default_model
@@ -291,15 +291,36 @@ function getTourProvider(config) {
 
 /**
  * Gets the model for tour generation.
- * Resolution order: tours.model → summaries.model → providerClass fast-tier → default_model
+ * Resolution order: tours.model → summaries.model → providerClass built-in
+ * default → default_model
+ *
+ * Unlike getSummaryModel, this does not pick the fast tier: a tour is an
+ * agentic walk of the codebase, which calls for the provider's default model.
+ * The provider default wins even when the tour provider IS the global
+ * default provider — configs written before a default-model change still
+ * carry the old global `default_model`, and that should not decide the tour
+ * model. An explicit `summaries.model` still applies. Providers with no
+ * built-in default (e.g. OpenCode returns null) fall through to
+ * default_model.
+ *
+ * Known limitation (same as getSummaryModel): this reads the provider class's
+ * STATIC built-in default, so per-provider config overrides
+ * (`providers.<id>.models` / `default_model` / `disabled_models`) are not
+ * applied here.
+ *
  * @param {Object} config - Configuration object
- * @param {Function} [providerClass] - Optional provider class with static getModels()
+ * @param {Function} [providerClass] - Optional provider class with static getDefaultModel()
  * @returns {string} - Model name
  */
 function getTourModel(config, providerClass = null) {
-  const explicit = config && config.tours && config.tours.model;
+  const explicit = (config && config.tours && config.tours.model)
+    || (config && config.summaries && config.summaries.model);
   if (explicit) return explicit;
-  return getSummaryModel(config, providerClass);
+  if (providerClass && typeof providerClass.getDefaultModel === 'function') {
+    const providerDefault = providerClass.getDefaultModel();
+    if (providerDefault) return providerDefault;
+  }
+  return getDefaultModel(config);
 }
 
 /**
@@ -627,6 +648,10 @@ function isExclusiveAltHost(repoConfig) {
  * is consulted. The repo's explicit `features` block (written for the alt host)
  * also does not apply to its github.com binding.
  *
+ * The binding also carries `cloneUrl` — the repo's explicitly configured
+ * `clone_url`, or `null` when unset. Like `features`, it describes the ALT
+ * host, so the github.com binding of a DUAL repo always reports `null`.
+ *
  * Refreshable sources (`repo:token_command`, `config:github_token_command`)
  * additionally carry a `refresh` closure on the returned binding. Calling
  * `refresh()` busts the cached token for that exact source, re-runs the
@@ -638,7 +663,7 @@ function isExclusiveAltHost(repoConfig) {
  * @param {string|null|undefined} repository - "owner/repo" identifier, or null/undefined for no-repo fallback
  * @param {Object} config - Configuration object from loadConfig()
  * @param {{ host?: string|null }} [options] - Per-PR host override (see above)
- * @returns {{ apiHost: string|null, host: string|null, token: string, features: Object, source: string, refresh: (function(): string)|null }}
+ * @returns {{ apiHost: string|null, host: string|null, token: string, features: Object, cloneUrl: string|null, source: string, refresh: (function(): string)|null }}
  */
 function resolveHostBinding(repository, config, options = {}) {
   const safeConfig = config || {};
@@ -688,6 +713,14 @@ function resolveHostBinding(repository, config, options = {}) {
   const explicitFeatures = isDualGithubBinding ? undefined : repoConfig?.features;
   const features = _resolveFeatures(apiHost, explicitFeatures);
 
+  // Explicitly configured canonical clone URL for this repo. Like `features`,
+  // it describes the alt host, so a dual repo's github.com binding does not
+  // carry it (github.com's API reports the right clone_url itself).
+  const configuredCloneUrl = (repoConfig && typeof repoConfig.clone_url === 'string' && repoConfig.clone_url)
+    ? repoConfig.clone_url
+    : null;
+  const cloneUrl = isDualGithubBinding ? null : configuredCloneUrl;
+
   // Token resolution
   let token = '';
   let source = 'none';
@@ -697,7 +730,7 @@ function resolveHostBinding(repository, config, options = {}) {
     token = process.env.GITHUB_TOKEN;
     source = 'env:GITHUB_TOKEN';
     logger.debug('Using GitHub token from GITHUB_TOKEN environment variable');
-    return { apiHost, host: apiHost, token, features, source, refresh: null };
+    return { apiHost, host: apiHost, token, features, cloneUrl, source, refresh: null };
   }
 
   // 2. Repo-level literal token (alt-host credential; not used for a dual
@@ -706,7 +739,7 @@ function resolveHostBinding(repository, config, options = {}) {
     token = repoConfig.token;
     source = 'repo:token';
     logger.debug(`Using token from repos[${repository}].token`);
-    return { apiHost, host: apiHost, token, features, source, refresh: null };
+    return { apiHost, host: apiHost, token, features, cloneUrl, source, refresh: null };
   }
 
   // 3. Repo-level token_command
@@ -718,6 +751,7 @@ function resolveHostBinding(repository, config, options = {}) {
         host: apiHost,
         token: result,
         features,
+        cloneUrl,
         source: 'repo:token_command',
         refresh: _makeRefresh(repository, safeConfig, 'repo:token_command', options)
       };
@@ -731,7 +765,7 @@ function resolveHostBinding(repository, config, options = {}) {
     token = safeConfig.github_token;
     source = 'config:github_token';
     logger.debug('Using GitHub token from config.github_token');
-    return { apiHost, host: apiHost, token, features, source, refresh: null };
+    return { apiHost, host: apiHost, token, features, cloneUrl, source, refresh: null };
   }
 
   // 5. Top-level github_token_command. Like step 4, github.com-only.
@@ -747,6 +781,7 @@ function resolveHostBinding(repository, config, options = {}) {
         host: apiHost,
         token: result,
         features,
+        cloneUrl,
         source: 'config:github_token_command',
         refresh: _makeRefresh(repository, safeConfig, 'config:github_token_command', options)
       };
@@ -758,7 +793,7 @@ function resolveHostBinding(repository, config, options = {}) {
   } else {
     logger.debug('No token resolved for host binding');
   }
-  return { apiHost, host: apiHost, token: '', features, source: 'none', refresh: null };
+  return { apiHost, host: apiHost, token: '', features, cloneUrl, source: 'none', refresh: null };
 }
 
 /**
@@ -1087,6 +1122,18 @@ function validateRepoConfig(config) {
       } catch (err) {
         throw new Error(
           `Invalid pair-review config: repos["${repoKey}"].git_remote_pattern is not a valid regular expression: ${err.message}`
+        );
+      }
+    }
+
+    // Optional canonical clone URL for the repository. Primarily for alt
+    // hosts whose API omits `base.repo.clone_url` on the PR response; without
+    // it pair-review falls back to a github.com URL, which matches the wrong
+    // local remote and clones from the wrong host.
+    if (repoEntry.clone_url !== undefined && repoEntry.clone_url !== null) {
+      if (typeof repoEntry.clone_url !== 'string' || !repoEntry.clone_url) {
+        throw new Error(
+          `Invalid pair-review config: repos["${repoKey}"].clone_url must be a non-empty string.`
         );
       }
     }
@@ -1483,6 +1530,65 @@ function getRepoSkipBulkFetch(config, repository) {
 }
 
 /**
+ * Gets the explicitly configured canonical clone URL for a repository.
+ *
+ * Primarily for alt hosts whose GitHub-compatible REST API omits
+ * `base.repo.clone_url` from the pull request response. When configured, it
+ * is the URL matched against the local checkout's `git remote -v` entries to
+ * pick the fetch remote, and the URL used for a fresh clone when no local
+ * checkout exists.
+ *
+ * @param {Object} config - Configuration object from loadConfig()
+ * @param {string} repository - Repository in "owner/repo" format
+ * @returns {string|null} - Clone URL or null if not configured
+ */
+function getRepoCloneUrl(config, repository) {
+  const repoConfig = getRepoConfig(config || {}, repository);
+  const value = repoConfig?.clone_url;
+  return (typeof value === 'string' && value) ? value : null;
+}
+
+/**
+ * Host-aware variant of {@link getRepoCloneUrl}.
+ *
+ * `clone_url`, like `features`, describes the repo's ALT host, so the
+ * github.com binding of a DUAL repo (`api_host` set with `exclusive: false`)
+ * must not report it — github.com's API reports the right `clone_url` itself.
+ * This mirrors the `isDualGithubBinding` guard in `resolveHostBinding`, for
+ * callers that need the configured URL WITHOUT resolving a full binding (e.g.
+ * restore mode, which never contacts an API).
+ *
+ * `host` follows the `resolveHostBinding` options convention:
+ *   - `undefined` — host unknown; apply the ambiguity rule (an EXCLUSIVE
+ *     alt-host repo binds to its alt host, a DUAL or plain repo to github.com).
+ *   - `null` — github.com.
+ *   - `'<url>'` — an alt host.
+ *
+ * Unlike `resolveHostBinding` this never throws on a contradictory host: it
+ * is an advisory lookup, and a bad host simply yields the conservative answer.
+ *
+ * @param {Object} config - Configuration object from loadConfig()
+ * @param {string} repository - `repos[...]` config-lookup key
+ * @param {string|null|undefined} host - The host this lookup is for (see above)
+ * @returns {string|null} - Clone URL, or null when unset or not applicable
+ */
+function getRepoCloneUrlForHost(config, repository, host) {
+  const repoConfig = getRepoConfig(config || {}, repository);
+  const configuredApiHost = (repoConfig && typeof repoConfig.api_host === 'string' && repoConfig.api_host)
+    ? repoConfig.api_host
+    : null;
+  if (configuredApiHost !== null && !isExclusiveAltHost(repoConfig)) {
+    // Dual repo: the ambiguity rule (host unknown) binds github.com, and so
+    // does an explicit `null`. Either way the configured URL does not apply.
+    const effectiveHost = host === undefined ? null : host;
+    if (effectiveHost === null) {
+      return null;
+    }
+  }
+  return getRepoCloneUrl(config, repository);
+}
+
+/**
  * Gets the configured pool size for a repository from file config only.
  * Prefer resolvePoolConfig() when DB repo_settings are available.
  * @param {Object} config - Configuration object from loadConfig()
@@ -1732,6 +1838,8 @@ module.exports = {
   resolveRepoOptions,
   getRepoResetScript,
   getRepoSkipBulkFetch,
+  getRepoCloneUrl,
+  getRepoCloneUrlForHost,
   getRepoPoolSize,
   getRepoPoolFetchInterval,
   getRepoLoadSkills,

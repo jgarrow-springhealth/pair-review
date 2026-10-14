@@ -10,6 +10,11 @@ class SuggestionManager {
     this.prManager = prManagerRef;
     // Concurrency guard for displayAISuggestions
     this._isDisplayingSuggestions = false;
+    // Latest list requested while a display was running; shown when it ends
+    this._pendingSuggestions = null;
+    // Bumped by clearAISuggestions so a display already running stops
+    // instead of putting the cleared findings back
+    this._displayEpoch = 0;
 
     // Event delegation for "Ask about this" chat button on suggestions
     document.addEventListener('click', (e) => {
@@ -193,69 +198,6 @@ class SuggestionManager {
   }
 
   /**
-   * Find suggestions that target lines currently hidden in gaps
-   * @param {Array} suggestions - Array of suggestions
-   * @returns {Array} Suggestions targeting hidden lines
-   */
-  findHiddenSuggestions(suggestions) {
-    const hiddenItems = [];
-
-    for (const suggestion of suggestions) {
-      const file = suggestion.file;
-      const line = suggestion.line_start;
-      const lineEnd = suggestion.line_end || line;
-      // Get side from suggestion, default to 'RIGHT' for backwards compatibility
-      const side = suggestion.side || 'RIGHT';
-
-      // For PierreBridge files, check if the line is actually visible in the rendered DOM
-      if (this.prManager.pierreBridge?.files.has(file)) {
-        if (!this.prManager.pierreBridge.isLineVisible(file, line, side)) {
-          hiddenItems.push({ file, line, lineEnd, side });
-        }
-        continue;
-      }
-
-      // Find the file wrapper
-      const fileElement = this.findFileElement(file);
-
-      if (!fileElement) {
-        // File not in diff at all, not a hidden line issue
-        continue;
-      }
-
-      // Check if any line in the range is visible (with matching side)
-      let anyLineVisible = false;
-      const lineTracker = this.prManager?.lineTracker || (window.LineTracker ? new window.LineTracker() : null);
-
-      for (let checkLine = line; checkLine <= lineEnd; checkLine++) {
-        const lineRows = fileElement.querySelectorAll('tr');
-        for (const row of lineRows) {
-          // Pass side to getLineNumber() to get the correct coordinate system
-          // For LEFT side: returns old line number (deleted lines or context lines in OLD coords)
-          // For RIGHT side: returns new line number (added lines or context lines in NEW coords)
-          // Context lines have BOTH coordinates, so they can match either side when queried appropriately
-          const lineNum = lineTracker ? lineTracker.getLineNumber(row, side) : null;
-          // Match the line number returned for the requested side
-          // Note: We no longer need to check rowSide separately because getLineNumber(row, side)
-          // already returns the appropriate line number for the requested coordinate system
-          if (lineNum === checkLine) {
-            anyLineVisible = true;
-            break;
-          }
-        }
-        if (anyLineVisible) break;
-      }
-
-      if (!anyLineVisible) {
-        console.log(`[findHiddenSuggestions] Hidden: ${file}:${line}-${lineEnd} (${side})`);
-        hiddenItems.push({ file, line, lineEnd, side });
-      }
-    }
-
-    return hiddenItems;
-  }
-
-  /**
    * Normalize the `is_file_level` flag to a boolean.
    * This field arrives in two shapes across the codebase: boolean `true` from
    * the analyses merge path (src/routes/analyses.js) and integer `1` from the
@@ -269,58 +211,127 @@ class SuggestionManager {
   }
 
   /**
-   * Display AI suggestions inline with diff
-   * Uses a concurrency guard to prevent multiple simultaneous executions
+   * Remove every rendered AI suggestion card: inline rows (legacy renderer),
+   * Pierre `suggestion` annotations and file-level AI cards. User comment
+   * cards are untouched. The navigator list is left alone; see
+   * clearAISuggestions for the full clear.
+   * @returns {number} Number of inline rows removed
+   * @private
+   */
+  _removeRenderedSuggestions() {
+    const existingSuggestionRows = document.querySelectorAll('.ai-suggestion-row');
+    existingSuggestionRows.forEach(row => row.remove());
+
+    // Replace suggestion annotations, but preserve expanded context. These
+    // ranges are shared with user comments, external threads and navigation;
+    // clearing them here can leave those cards without a rendered anchor.
+    const pierreBridge = this.prManager?.pierreBridge;
+    if (pierreBridge) {
+      for (const [fileName] of pierreBridge.files) {
+        pierreBridge.removeAnnotationsByType(fileName, 'suggestion');
+      }
+    }
+
+    // An empty suggestions list clears the file-level AI cards; null
+    // comments leaves the user's file-level comment cards alone.
+    this.prManager?.fileCommentManager?.loadFileComments(null, []);
+
+    return existingSuggestionRows.length;
+  }
+
+  /**
+   * Remove every displayed AI suggestion: the rendered cards (inline rows,
+   * Pierre annotations, file-level cards) and the navigator list. Used when a
+   * new analysis starts, so nothing from the previous run stays on screen
+   * while it runs. User comments are untouched.
+   *
+   * A display that is running, or queued behind one, would put the cleared
+   * findings back when it finishes, so both are abandoned.
+   */
+  clearAISuggestions() {
+    this._displayEpoch = (this._displayEpoch || 0) + 1;
+    this._pendingSuggestions = null;
+    this._closeReasoningPopover();
+    const removed = this._removeRenderedSuggestions();
+    console.log(`[UI] Cleared AI suggestions (${removed} inline rows)`);
+
+    const navigator = this.prManager?.suggestionNavigator;
+    if (navigator) {
+      navigator.updateSuggestions([]);
+      this._syncNavigatorLayout([]);
+    }
+  }
+
+  /**
+   * Reserve room for the navigator only while it has visible suggestions
+   * and is not collapsed.
+   * @param {Array} suggestions - The suggestions the navigator now shows
+   * @private
+   */
+  _syncNavigatorLayout(suggestions) {
+    const mainContent = document.querySelector('.main-content');
+    if (mainContent && this.prManager?.suggestionNavigator) {
+      const visibleSuggestions = suggestions.filter(s => s.status !== 'dismissed');
+      // Only add navigator-visible if we have suggestions AND the navigator is not collapsed
+      if (visibleSuggestions.length > 0 && !this.prManager.suggestionNavigator.isCollapsed) {
+        mainContent.classList.add('navigator-visible');
+      } else {
+        mainContent.classList.remove('navigator-visible');
+      }
+    }
+  }
+
+  /**
+   * Display AI suggestions inline with diff.
+   *
+   * Displays never interleave. A call made while one is running does not
+   * wait: it records its list and returns at once, and the latest recorded
+   * list is displayed when the running one ends. Returning at once (rather
+   * than awaiting the queued display) matters: a running display can itself
+   * be awaiting work that requests a display, and waiting there would
+   * deadlock.
    * @param {Array} suggestions - Array of suggestions to display
    */
   async displayAISuggestions(suggestions) {
-    // Concurrency guard: prevent multiple simultaneous executions
-    // This avoids duplicated/interleaved suggestions when called rapidly
     if (this._isDisplayingSuggestions) {
-      console.log('[UI] displayAISuggestions already in progress, skipping');
+      console.log('[UI] displayAISuggestions already in progress, queued the latest request');
+      this._pendingSuggestions = suggestions;
       return;
     }
     this._isDisplayingSuggestions = true;
+    // clearAISuggestions bumps the epoch; a display it interrupts must stop
+    // after its awaits rather than show the cleared list.
+    const epoch = this._displayEpoch;
 
     try {
       this._closeReasoningPopover();
       console.log(`[UI] Displaying ${suggestions.length} AI suggestions`);
 
-      // Clear existing AI suggestion rows before displaying new ones
-      const existingSuggestionRows = document.querySelectorAll('.ai-suggestion-row');
-      existingSuggestionRows.forEach(row => row.remove());
-      console.log(`[UI] Removed ${existingSuggestionRows.length} existing suggestion rows`);
+      // Clear the previous set's cards before displaying new ones. The
+      // navigator keeps its list (and selection) until the new list replaces
+      // it below.
+      const removedRows = this._removeRenderedSuggestions();
+      console.log(`[UI] Removed ${removedRows} existing suggestion rows`);
 
       // Only inline (line-targeted) suggestions need the diff body rendered
       // ahead of time. File-level findings (is_file_level === 1 or no
       // line_start) are handed to FileCommentManager and rendered above the
-      // diff — they never scan <tr> rows or call findHiddenSuggestions, so
-      // forcing their bodies to render would recreate the eager-render cost
+      // diff — they never need inline code rows, so forcing their bodies to
+      // render would recreate the eager-render cost
       // the lazy-body change removed (reviews dominated by file-level analyses
       // are a common repository-wide pattern). Filter once and reuse below.
       const inlineSuggestions = suggestions.filter(
         s => s.file && s.line_start != null && s.is_file_level !== 1
       );
 
-      // Render the lazy body of every file an INLINE suggestion targets BEFORE
-      // scanning rows. With lazy rendering an unrendered file has zero rows, so
-      // without this findHiddenSuggestions() would flag every line as "hidden"
-      // and we'd gap-expand against bodies that aren't even built yet.
+      // Render the lazy body of every file an INLINE suggestion targets before
+      // anchoring cards. An unrendered file has no code rows for insertion.
       // ensureFileBodyRendered is a cheap no-op for files already rendered or
-      // not in the diff. Pierre-rendered files are not in _lazyFileBodies, so
-      // this only affects legacy-rendered files.
+      // not in the diff. Both rendering engines can have lazy file bodies.
       if (this.prManager?.ensureFileBodyRendered) {
         const targetFiles = new Set(inlineSuggestions.map(s => s.file));
         for (const file of targetFiles) {
           await this.prManager.ensureFileBodyRendered(file);
-        }
-      }
-
-      // Clear stale Pierre annotations/ranges before expanding for the new set.
-      if (this.prManager.pierreBridge) {
-        for (const [fileName] of this.prManager.pierreBridge.files) {
-          this.prManager.pierreBridge.removeAnnotationsByType(fileName, 'suggestion');
-          this.prManager.pierreBridge.clearContextRanges(fileName);
         }
       }
 
@@ -335,9 +346,16 @@ class SuggestionManager {
           line_start: suggestion.line_start || suggestion.line_end,
           line_end: suggestion.line_end || suggestion.line_start,
           side: suggestion.side || 'RIGHT',
+          contextPadding: 3,
         }));
       if (lineTargets.length > 0 && this.prManager?.ensureLinesVisible) {
         await this.prManager.ensureLinesVisible(lineTargets);
+      }
+
+      // The findings were cleared while we awaited (a new analysis started).
+      if (epoch !== this._displayEpoch) {
+        console.log('[UI] Suggestions were cleared during display; not showing the stale list');
+        return;
       }
 
       // For files rendered by @pierre/diffs, use annotation-based display.
@@ -385,54 +403,6 @@ class SuggestionManager {
         }
       }
 
-      // Auto-expand hidden lines for suggestions that target non-visible lines
-      // Pass the side parameter so expandForSuggestion knows which coordinate system to use:
-      // - RIGHT side = NEW coordinates (modified file, most common for AI suggestions)
-      // - LEFT side = OLD coordinates (deleted lines from original file)
-      const hiddenSuggestions = this.findHiddenSuggestions(inlineSuggestions);
-      if (hiddenSuggestions.length > 0) {
-        console.log(`[UI] Found ${hiddenSuggestions.length} suggestions targeting hidden lines, expanding...`);
-
-        // Batch Pierre-bridge files: collect all ranges per file, one addContextRanges call each
-        const pierreRanges = new Map();
-        const legacyItems = [];
-
-        for (const hidden of hiddenSuggestions) {
-          if (this.prManager?.pierreBridge?.files.has(hidden.file)) {
-            if (!pierreRanges.has(hidden.file)) pierreRanges.set(hidden.file, []);
-            const padding = 3;
-            let rangeStart = hidden.line;
-            let rangeEnd = hidden.lineEnd || hidden.line;
-            // addContextRanges expects NEW-file coordinates; LEFT-side items carry OLD numbers.
-            if (hidden.side === 'LEFT') {
-              const converted = this.prManager.pierreBridge.convertOldToNew(hidden.file, rangeStart, rangeEnd);
-              if (!converted) continue;
-              rangeStart = converted.startLine;
-              rangeEnd = converted.endLine;
-            }
-            pierreRanges.get(hidden.file).push({
-              startLine: Math.max(1, rangeStart - padding),
-              endLine: rangeEnd + padding,
-            });
-          } else {
-            legacyItems.push(hidden);
-          }
-        }
-
-        // One render per Pierre file instead of N
-        for (const [file, ranges] of pierreRanges) {
-          this.prManager.pierreBridge.addContextRanges(file, ranges);
-        }
-
-        // Legacy files: expand individually
-        for (const hidden of legacyItems) {
-          if (this.prManager?.expandForSuggestion) {
-            await this.prManager.expandForSuggestion(hidden.file, hidden.line, hidden.lineEnd, hidden.side);
-          }
-        }
-        console.log(`[UI] Finished expanding hidden lines`);
-      }
-
       // Create suggestion navigator if not already created
       if (!this.prManager?.suggestionNavigator && window.SuggestionNavigator) {
         console.log('[UI] Creating SuggestionNavigator instance');
@@ -447,16 +417,7 @@ class SuggestionManager {
       }
 
       // Adjust main content layout when navigator is visible
-      const mainContent = document.querySelector('.main-content');
-      if (mainContent && this.prManager?.suggestionNavigator) {
-        const visibleSuggestions = suggestions.filter(s => s.status !== 'dismissed');
-        // Only add navigator-visible if we have suggestions AND the navigator is not collapsed
-        if (visibleSuggestions.length > 0 && !this.prManager.suggestionNavigator.isCollapsed) {
-          mainContent.classList.add('navigator-visible');
-        } else {
-          mainContent.classList.remove('navigator-visible');
-        }
-      }
+      this._syncNavigatorLayout(suggestions);
 
       // Separate file-level and line-level suggestions
       const fileLevelSuggestions = [];
@@ -470,10 +431,12 @@ class SuggestionManager {
         }
       });
 
-      // Handle file-level suggestions via FileCommentManager
-      if (fileLevelSuggestions.length > 0 && this.prManager?.fileCommentManager) {
+      // Handle file-level suggestions via FileCommentManager. The list
+      // replaces the previous AI cards even when it is empty; null comments
+      // leaves the user's file-level comment cards alone.
+      if (this.prManager?.fileCommentManager) {
         console.log('[UI] Routing file-level suggestions to FileCommentManager:', fileLevelSuggestions.length);
-        this.prManager.fileCommentManager.loadFileComments([], fileLevelSuggestions);
+        this.prManager.fileCommentManager.loadFileComments(null, fileLevelSuggestions);
       }
 
       // Group line-level suggestions by file, line, and side
@@ -583,7 +546,27 @@ class SuggestionManager {
     } finally {
       // Always clear the guard, even if an error occurred
       this._isDisplayingSuggestions = false;
+      this._runPendingDisplay();
     }
+  }
+
+  /**
+   * Start the display queued while another one ran, if any. Not awaited by
+   * the display that just ended, and its errors are logged here, so they
+   * never replace that display's own outcome.
+   * @private
+   */
+  _runPendingDisplay() {
+    const pending = this._pendingSuggestions;
+    if (!pending) return;
+    this._pendingSuggestions = null;
+    // Through PRManager when present, so its post-display refresh runs too.
+    const display = typeof this.prManager?.displayAISuggestions === 'function'
+      ? this.prManager.displayAISuggestions(pending)
+      : this.displayAISuggestions(pending);
+    Promise.resolve(display).catch(error => {
+      console.error('[UI] Queued suggestion display failed:', error);
+    });
   }
 
   /**

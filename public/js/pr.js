@@ -2912,11 +2912,14 @@ class PRManager {
     for (const part of parts) {
       if (!part.trim()) continue;
 
-      // Extract filename from diff --git line
-      const match = part.match(/^diff --git a\/(.+?) b\/(.+)/);
-      if (match) {
-        const fileName = match[2]; // Use the 'b' path (new file path)
-        filePatchMap.set(fileName, part);
+      // Key by the decoded new path: the `rename to` line when there is one,
+      // otherwise the 'b' side of the diff --git line. Git C-quotes names
+      // containing control characters, `"` or `\` (`"b/tab\tname.js"`), and
+      // the server keys changed_files, comments and suggestions by the
+      // decoded spelling.
+      const paths = window.GitPaths.parsePatchPaths(part);
+      if (paths) {
+        filePatchMap.set(paths.newPath, part);
       }
     }
 
@@ -7001,7 +7004,7 @@ class PRManager {
    * Ensure that the given line ranges are visible in the diff view.
    * For each item, checks if the target line rows exist in the DOM; if not,
    * calls expandForSuggestion() to expand the gap containing those lines.
-   * @param {Array<{file: string, line_start: number, line_end: number, side: string}>} items
+   * @param {Array<{file: string, line_start: number, line_end: number, side: string, contextPadding?: number}>} items
    */
   async ensureLinesVisible(items) {
     for (const item of items) {
@@ -7046,9 +7049,12 @@ class PRManager {
             }
           }
 
+          // Pad after converting to NEW coordinates. Padding the requested
+          // endpoints can cross edits on LEFT or put a target beyond EOF.
+          const padding = item.contextPadding || 0;
           this.pierreBridge.addContextRanges(file, [{
-            startLine: rangeStart,
-            endLine: rangeEnd,
+            startLine: Math.max(1, rangeStart - padding),
+            endLine: rangeEnd + padding,
           }]);
         }
         continue;
@@ -7057,28 +7063,16 @@ class PRManager {
       const fileElement = this.findFileElement(file);
       if (!fileElement) continue;
 
-      // Render the file body first — with lazy rendering an unrendered file
-      // has zero rows, so the visibility scan below would always miss and the
-      // line would be treated as "hidden in a gap" (then gap-expanded against
-      // zero gap rows → silent anchor failure).
-      await this.ensureFileBodyRendered(file);
-
-      // Check if any line in the range is already visible
-      let anyLineVisible = false;
-      const lineRows = fileElement.querySelectorAll('tr');
-      for (let checkLine = line_start; checkLine <= (line_end || line_start); checkLine++) {
-        for (const row of lineRows) {
-          const lineNum = this.getLineNumber(row, resolvedSide);
-          if (lineNum === checkLine) {
-            anyLineVisible = true;
-            break;
-          }
+      // Cards anchor at line_start except Pierre suggestions, which use
+      // line_end. Reveal both endpoints so either card has a row, even when
+      // only a middle line is visible. Endpoints may occupy different gaps;
+      // re-query after expansion because it replaces rows.
+      for (const line of new Set([line_start, line_end || line_start])) {
+        const visible = Array.from(fileElement.querySelectorAll('tr'))
+          .some(row => this.getLineNumber(row, resolvedSide) === line);
+        if (!visible) {
+          await this.expandForSuggestion(file, line, line_end || line_start, resolvedSide);
         }
-        if (anyLineVisible) break;
-      }
-
-      if (!anyLineVisible) {
-        await this.expandForSuggestion(file, line_start, line_end || line_start, resolvedSide);
       }
     }
   }
@@ -7801,9 +7795,12 @@ class PRManager {
         });
       }
 
-      // Load file-level comments into their zones (only active comments reach here)
-      if (this.fileCommentManager && fileLevelComments.length > 0) {
-        this.fileCommentManager.loadFileComments(fileLevelComments, []);
+      // Load file-level comments into their zones (only active comments reach
+      // here). Always pass the list, even when empty, so the cards of a
+      // deleted or dismissed last comment are removed. null suggestions
+      // leaves the file-level AI cards alone.
+      if (this.fileCommentManager) {
+        this.fileCommentManager.loadFileComments(fileLevelComments, null);
       }
 
       // Populate AI Panel with all comments (including dismissed if requested)
@@ -7897,10 +7894,6 @@ class PRManager {
   /**
    * AI Suggestion methods - delegate to SuggestionManager
    */
-  findHiddenSuggestions(suggestions) {
-    return this.suggestionManager.findHiddenSuggestions(suggestions);
-  }
-
   async displayAISuggestions(suggestions) {
     await this.suggestionManager.displayAISuggestions(suggestions);
     this.aiSuggestions = Array.isArray(suggestions) ? suggestions.slice() : [];
@@ -9556,6 +9549,27 @@ class PRManager {
   }
 
   /**
+   * Clear the previous run's AI findings when a new analysis starts: the AI
+   * panel list and, through SuggestionManager.clearAISuggestions, every
+   * suggestion card in the diff (inline rows, Pierre annotations, file-level
+   * cards) and the navigator list. User comments stay. Shared by PR mode
+   * (startAnalysis) and Local mode (startLocalAnalysis in local.js).
+   */
+  clearFindingsForNewAnalysis() {
+    if (typeof window.aiPanel?.clearAllFindings === 'function') {
+      try {
+        // Also clears the diff view
+        window.aiPanel.clearAllFindings();
+        return;
+      } catch (e) {
+        console.warn('Error clearing AI panel findings:', e);
+        // Fall through so the diff view is still cleared
+      }
+    }
+    this.suggestionManager?.clearAISuggestions();
+  }
+
+  /**
    * Start the actual AI analysis with the given config
    * @param {string} owner - Repository owner
    * @param {string} repo - Repository name
@@ -9578,16 +9592,7 @@ class PRManager {
       }
 
       // Clear existing AI suggestions from UI immediately when starting new analysis
-      if (window.aiPanel && typeof window.aiPanel.clearAllFindings === 'function') {
-        try {
-          window.aiPanel.clearAllFindings();
-        } catch (e) {
-          console.warn('Error clearing AI panel findings:', e);
-          // Fall through to manual DOM cleanup
-        }
-      }
-      // Always do manual DOM cleanup as backup
-      document.querySelectorAll('.ai-suggestion-row').forEach(row => row.remove());
+      this.clearFindingsForNewAnalysis();
 
       // Determine endpoint and body based on whether this is a council analysis
       let analyzeUrl, analyzeBody;

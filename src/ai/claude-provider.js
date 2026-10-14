@@ -26,14 +26,23 @@ const BIN_DIR = path.join(__dirname, '..', '..', 'bin');
  * in the constructor's base args; individual models can override this via extra_args
  * (e.g., Haiku uses adaptive thinking for efficiency).
  *
- * Effort support by model (newest CLIs): Fable 5.1, Fable 5, Opus 5,
- * Opus 4.8 / 4.7, and Sonnet 5 support low|medium|high|xhigh|max; Opus 4.6 &
- * Sonnet 4.6 support low|medium|high|max (no xhigh); Haiku has no effort levels.
+ * Effort support by model (newest CLIs): Fable 5.1, Fable 5, Opus 5.5, Opus 5,
+ * and Sonnet 5 support low|medium|high|xhigh|max; Sonnet 4.6 supports
+ * low|medium|high|max (no xhigh); Haiku has no effort levels.
+ * The CLI's own default effort for Opus 5.5 is `medium` (and it ignores a
+ * top-level `effortLevel` in user settings), so its entries rely on the env var,
+ * which the CLI treats as an explicit choice at the top of its effort precedence.
  */
 const CLAUDE_MODELS = [
   // ── Thorough tier ───────────────────────────────────────────────────────
   {
     id: 'fable-5.1-xhigh',
+    // The bare generation aliases ('fable' here, 'opus' on opus-5.5-xhigh) track
+    // the newest generation at XHigh: a config, council, or --model naming the
+    // alias moves up a generation on each update without losing effort. Older
+    // generations stay reachable by their explicit ids. The provider DEFAULT
+    // (opus-5.5-high) is a separate setting, chosen by the `default: true` flag.
+    aliases: ['fable'],
     cli_model: 'claude-fable-5-1',
     env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
     name: 'Fable 5.1 XHigh',
@@ -61,12 +70,6 @@ const CLAUDE_MODELS = [
   },
   {
     id: 'fable-5-xhigh',
-    // The bare 'fable' alias intentionally stays pinned to Fable 5 (the same way
-    // 'opus' stays on opus-4.8-xhigh) so existing configs and --model fable
-    // invocations keep resolving to the generation they were written against.
-    // The provider DEFAULT is a separate knob: it moved to opus-5-high (same
-    // price as Opus 4.8) while the 'opus' alias stayed pinned to opus-4.8-xhigh.
-    aliases: ['fable'],
     cli_model: 'claude-fable-5',
     env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
     name: 'Fable 5 XHigh',
@@ -91,13 +94,46 @@ const CLAUDE_MODELS = [
     extra_args: ['--thinking', 'adaptive']
   },
   {
+    id: 'opus-5.5-xhigh',
+    // Generation alias; see fable-5.1-xhigh above. The Opus 4.x entries were
+    // dropped; their ids resolve to the Opus 5.5 entry at the matching effort so
+    // saved configs, councils, and --model flags keep working.
+    aliases: ['opus', 'opus-4.8-xhigh', 'opus-4.7-xhigh'],
+    cli_model: 'claude-opus-5-5',
+    env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
+    name: 'Opus 5.5 XHigh',
+    tier: 'thorough',
+    tagline: 'Newest Opus',
+    description: 'Opus 5.5 (newest) with extra-high effort — deepest thorough reviews',
+    badge: 'Extra-High Effort',
+    badgeClass: 'badge-power',
+    // Opus 5.5, like every Fable generation, is adaptive-thinking-only. Current
+    // CLIs normalize `--thinking enabled`, but pin adaptive so an older CLI never
+    // sends an explicit thinking mode the API rejects.
+    extra_args: ['--thinking', 'adaptive']
+  },
+  {
+    id: 'opus-5.5-high',
+    aliases: ['opus-4.8-high', 'opus-4.7-high', 'opus-4.6-high', 'opus-4.6-1m', 'opus-4.5'],
+    cli_model: 'claude-opus-5-5',
+    env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+    name: 'Opus 5.5 High',
+    tier: 'thorough',
+    tagline: 'Recommended Default',
+    description: 'Opus 5.5 (newest) with high effort — the recommended default for thorough reviews',
+    badge: 'Recommended',
+    badgeClass: 'badge-recommended',
+    default: true,
+    extra_args: ['--thinking', 'adaptive']
+  },
+  {
     id: 'opus-5-xhigh',
     cli_model: 'claude-opus-5',
     env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
     name: 'Opus 5 XHigh',
     tier: 'thorough',
-    tagline: 'Newest Opus',
-    description: 'Opus 5 (newest) with extra-high effort — deepest thorough reviews',
+    tagline: 'Previous Opus',
+    description: 'Opus 5 (previous Opus) with extra-high effort',
     badge: 'Extra-High Effort',
     badgeClass: 'badge-power'
   },
@@ -107,67 +143,9 @@ const CLAUDE_MODELS = [
     env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
     name: 'Opus 5 High',
     tier: 'thorough',
-    tagline: 'Recommended Default',
-    description: 'Opus 5 (newest) with high effort — the recommended default for thorough reviews',
-    badge: 'Recommended',
-    badgeClass: 'badge-recommended',
-    default: true
-  },
-  {
-    id: 'opus-4.8-xhigh',
-    aliases: ['opus'],
-    cli_model: 'claude-opus-4-8',
-    env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
-    name: 'Opus 4.8 XHigh',
-    tier: 'thorough',
-    tagline: 'Previous Gen',
-    description: 'Opus 4.8 with extra-high effort',
-    badge: 'Previous Gen',
-    badgeClass: 'badge-power'
-  },
-  {
-    id: 'opus-4.8-high',
-    cli_model: 'claude-opus-4-8',
-    env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
-    name: 'Opus 4.8 High',
-    tier: 'thorough',
-    tagline: 'High Effort',
-    description: 'Opus 4.8 with high effort — thorough, quicker than XHigh',
-    badge: 'Thorough',
-    badgeClass: 'badge-power'
-  },
-  {
-    id: 'opus-4.7-xhigh',
-    cli_model: 'claude-opus-4-7',
-    env: { CLAUDE_CODE_EFFORT_LEVEL: 'xhigh' },
-    name: 'Opus 4.7 XHigh',
-    tier: 'thorough',
-    tagline: 'Previous Gen',
-    description: 'Opus 4.7 with extra-high effort',
-    badge: 'Previous Gen',
-    badgeClass: 'badge-power'
-  },
-  {
-    id: 'opus-4.7-high',
-    cli_model: 'claude-opus-4-7',
-    env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
-    name: 'Opus 4.7 High',
-    tier: 'thorough',
-    tagline: 'High Effort',
-    description: 'Opus 4.7 with high effort — thorough, quicker than XHigh',
-    badge: 'Thorough',
-    badgeClass: 'badge-power'
-  },
-  {
-    id: 'opus-4.6-high',
-    aliases: ['opus-4.6-low', 'opus-4.6-medium', 'opus-4.5'],
-    cli_model: 'claude-opus-4-6',
-    env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
-    name: 'Opus 4.6 High',
-    tier: 'thorough',
-    tagline: 'Previous Gen',
-    description: 'Opus 4.6 with high effort',
-    badge: 'Previous Gen',
+    tagline: 'Previous Opus',
+    description: 'Opus 5 with high effort — quicker than XHigh',
+    badge: 'High Effort',
     badgeClass: 'badge-power'
   },
   // ── Balanced tier ───────────────────────────────────────────────────────
@@ -194,6 +172,19 @@ const CLAUDE_MODELS = [
     badgeClass: 'badge-speed'
   },
   {
+    id: 'opus-5.5-medium',
+    aliases: ['opus-4.6-medium'],
+    cli_model: 'claude-opus-5-5',
+    env: { CLAUDE_CODE_EFFORT_LEVEL: 'medium' },
+    name: 'Opus 5.5 Medium',
+    tier: 'balanced',
+    tagline: 'Everyday Opus',
+    description: 'Opus 5.5 with medium effort — strong everyday reviews at lower cost and latency',
+    badge: 'Medium Effort',
+    badgeClass: 'badge-balanced',
+    extra_args: ['--thinking', 'adaptive']
+  },
+  {
     id: 'sonnet-4.6',
     cli_model: 'claude-sonnet-4-6',
     name: 'Sonnet 4.6',
@@ -202,16 +193,6 @@ const CLAUDE_MODELS = [
     description: 'Sonnet 4.6 — previous generation balanced model',
     badge: 'Previous Gen',
     badgeClass: 'badge-balanced'
-  },
-  {
-    id: 'opus-4.6-1m',
-    cli_model: 'claude-opus-4-6[1m]',
-    name: 'Opus 4.6 1M',
-    tier: 'balanced',
-    tagline: 'Extended Context',
-    description: 'Opus 4.6 high effort with 1M token context window',
-    badge: 'More Context',
-    badgeClass: 'badge-power'
   },
   // ── Fast tier ───────────────────────────────────────────────────────────
   {
@@ -222,6 +203,21 @@ const CLAUDE_MODELS = [
     tagline: 'Lightning Fast',
     description: 'Quick analysis for simple changes',
     badge: 'Fastest',
+    badgeClass: 'badge-speed',
+    extra_args: ['--thinking', 'adaptive']
+  },
+  {
+    // Kept after haiku: getFastTierModel() takes the first fast-tier entry for
+    // extraction and hunk summaries, which should stay on Haiku.
+    id: 'opus-5.5-low',
+    aliases: ['opus-4.6-low'],
+    cli_model: 'claude-opus-5-5',
+    env: { CLAUDE_CODE_EFFORT_LEVEL: 'low' },
+    name: 'Opus 5.5 Low',
+    tier: 'fast',
+    tagline: 'Quick Opus',
+    description: 'Opus 5.5 with low effort — fast passes over simple changes',
+    badge: 'Low Effort',
     badgeClass: 'badge-speed',
     extra_args: ['--thinking', 'adaptive']
   }
@@ -1036,10 +1032,6 @@ class ClaudeProvider extends AIProvider {
 
   static getModels() {
     return CLAUDE_MODELS;
-  }
-
-  static getDefaultModel() {
-    return 'opus-5-high';
   }
 
   static getInstallInstructions() {

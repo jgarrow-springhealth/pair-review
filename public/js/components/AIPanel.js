@@ -1262,11 +1262,11 @@ class AIPanel {
         }
 
         const doScroll = async () => {
-            // Reveal the target line first — for Pierre-rendered files this
-            // materializes deferred diffs and expands collapsed gaps.
+            // Pierre suggestions anchor at line_end; legacy suggestions anchor
+            // at line_start. Reveal both endpoints so either card has a row.
             if (file && line && window.prManager?.ensureLinesVisible) {
                 await window.prManager.ensureLinesVisible([
-                    { file, line_start: parseInt(line, 10), line_end: parseInt(line, 10), side: resolvedSide }
+                    { file, line_start: finding?.line_start || parseInt(line, 10), line_end: finding?.line_end || parseInt(line, 10), side: resolvedSide }
                 ]);
                 if (myGen !== this._navGen) return;
             }
@@ -1502,9 +1502,11 @@ class AIPanel {
         }
 
         const doScroll = async () => {
+            // Comments anchor at line_start. Reveal the full selected range,
+            // including an ending line that may be in another collapsed gap.
             if (file && line && window.prManager?.ensureLinesVisible) {
                 await window.prManager.ensureLinesVisible([
-                    { file, line_start: parseInt(line, 10), line_end: parseInt(line, 10), side: resolvedSide }
+                    { file, line_start: comment?.line_start || parseInt(line, 10), line_end: comment?.line_end || parseInt(line, 10), side: resolvedSide }
                 ]);
                 // A later sidebar click may have taken over while the gap was
                 // expanding. Never let this stale call snap back afterward.
@@ -2201,8 +2203,9 @@ class AIPanel {
         this.renderFindings();
         this.resetLevelFilter();
 
-        // Also clear suggestions from the diff view
-        document.querySelectorAll('.ai-suggestion-row').forEach(row => row.remove());
+        // Also clear suggestions from the diff view: inline rows, Pierre
+        // annotations, file-level cards and the navigator list
+        window.prManager?.suggestionManager?.clearAISuggestions?.();
     }
 
     // ========================================

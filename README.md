@@ -282,7 +282,7 @@ pair-review --local [path]
 | `--scope <start>..<end>` | **Local mode only.** Set the diff range a local review covers. Stops (in order): `branch`, `staged`, `unstaged`, `untracked`. Six valid ranges (contiguous, must include `unstaged`); default `unstaged..untracked`. `branch..*` diffs from the merge-base with the base branch. See [Local review scope](#local-review-scope). |
 | `--base <branch>` | **Local mode only.** With a `branch..*` scope, override base-branch auto-detection. Errors if used without a branch-start scope. |
 | `--model <name>` | Override the AI model for any provider. Model availability depends on provider configuration. |
-| `--provider <name>` | Override the AI provider. Applies to headless modes (`--ai-draft` / `--ai-review`) **and** to browser-driven auto-analysis (`--ai`), where it overrides the repo/app default the browser would otherwise use — including across single-port delegation to an already-running server. Defaults to the repo/app default provider (`claude`). Pair with `--model` when the model belongs to a non-default provider (e.g. `--provider codex --model gpt-5.5`). |
+| `--provider <name>` | Override the AI provider. Applies to headless modes (`--ai-draft` / `--ai-review`) **and** to browser-driven auto-analysis (`--ai`), where it overrides the repo/app default the browser would otherwise use — including across single-port delegation to an already-running server. Defaults to the repo/app default provider (`claude`). Pair with `--model` when the model belongs to a non-default provider (e.g. `--provider codex --model gpt-5.6-sol-high`). |
 | `--register` | Register `pair-review://` URL scheme handler (macOS only) |
 | `--unregister` | Unregister `pair-review://` URL scheme handler (macOS only) |
 | `--command <cmd>` | Custom CLI command for `--register` (default: `npx @in-the-loop-labs/pair-review`) |
@@ -298,7 +298,7 @@ pair-review 123 --ai                   # Auto-run AI analysis
 pair-review 123 --ai --provider codex  # Auto-run analysis in the browser with a specific provider
 pair-review --list-councils            # List saved councils and their handles
 pair-review 123 --ai-draft --council security-review  # Headless draft with a council
-pair-review 123 --ai-draft --provider codex --model gpt-5.5  # Headless draft with a specific provider + model
+pair-review 123 --ai-draft --provider codex --model gpt-5.6-sol-high  # Headless draft with a specific provider + model
 pair-review --local --ai --council security-review    # Local review with a council
 pair-review --local --headless         # Analyze local changes, print a summary, exit
 pair-review --local --headless --json  # Analyze local changes, emit JSON, exit
@@ -571,7 +571,7 @@ Configuration is stored in `~/.pair-review/config.json`:
   "port": 7247,
   "theme": "light",
   "default_provider": "claude",
-  "default_model": "opus"
+  "default_model": "opus-5.5-high"
 }
 ```
 
@@ -654,7 +654,7 @@ pair-review supports several environment variables for customizing behavior:
 
 **Note:** `GITHUB_TOKEN` is the standard environment variable used by many GitHub tools (gh CLI, GitHub Actions, etc.). When set, it takes precedence over the `github_token` field in the config file.
 
-**Note:** Choose the AI provider and model with the `--provider` and `--model` CLI flags. There is no environment-variable equivalent (the provider/model env vars were removed in v5 — see the changeset for migration). The `--provider` flag selects which provider runs the analysis; `--model` selects the model within that provider, so set both when the model belongs to a non-default provider (e.g. `--provider codex --model gpt-5.5`). The flag override outranks saved repository settings (`CLI flag > repo settings`); if the repo's default is a Review Council, an active `--provider`/`--model` override forces the single-provider path instead. To set a persistent default without passing a flag every time, use the `default_provider` / `default_model` config keys or the repo/global [settings pages](#global-settings-page).
+**Note:** Choose the AI provider and model with the `--provider` and `--model` CLI flags. There is no environment-variable equivalent (the provider/model env vars were removed in v5 — see the changeset for migration). The `--provider` flag selects which provider runs the analysis; `--model` selects the model within that provider, so set both when the model belongs to a non-default provider (e.g. `--provider codex --model gpt-5.6-sol-high`). The flag override outranks saved repository settings (`CLI flag > repo settings`); if the repo's default is a Review Council, an active `--provider`/`--model` override forces the single-provider path instead. To set a persistent default without passing a flag every time, use the `default_provider` / `default_model` config keys or the repo/global [settings pages](#global-settings-page).
 
 **Delegation caveat:** With single-port mode (the default `single_port: true`), a new invocation delegates to an already-running server. On that path the `--provider`/`--model` override is carried to the running server only alongside browser auto-analysis (`--ai`). Delegating without `--ai` (just opening the review) does not seed the override into the other process's manual analysis dialog — use `--ai`, or a headless mode, to pin the provider on the delegated path.
 
@@ -681,7 +681,7 @@ PAIR_REVIEW_ANTIGRAVITY_CMD="/usr/local/bin/agy" pair-review --local
 pair-review 123 --model opus
 
 # Force a specific provider + model for a headless review
-pair-review 123 --ai-draft --provider codex --model gpt-5.5
+pair-review 123 --ai-draft --provider codex --model gpt-5.6-sol-high
 
 # Combine a custom CLI path with a model flag
 PAIR_REVIEW_CLAUDE_CMD="/opt/claude/bin/claude" pair-review 123 --model haiku
@@ -703,7 +703,7 @@ pair-review integrates with AI providers via their CLI tools:
 
 - **Claude**: Uses Claude Code CLI
 - **Antigravity**: Uses the Antigravity CLI (`agy`), the successor to the Gemini CLI. Install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` (macOS/Linux; it is not an npm package) — see the [Antigravity docs](https://antigravity.google/docs). Antigravity is an analysis-only provider: it runs as an agentic reviewer in non-interactive print mode and has **no chat/ACP mode**.
-- **Codex**: Uses Codex CLI
+- **Codex**: Uses Codex CLI. GPT-5.6 Sol High (`gpt-5.6-sol-high`) remains the recommended default during rollout. GPT-6.1 Sol High (`gpt-6.1-sol-high`) and XHigh (`gpt-6.1-sol-xhigh`) are explicit choices for reviews and chat; Enterprise and Edu administrators must enable GPT-6.1 Sol access.
 - **GitHub Copilot**: Uses Copilot CLI
 - **OpenCode**: Uses OpenCode CLI (requires model configuration)
 - **Cursor**: Uses Cursor Agent CLI (streaming output with sandbox mode)
@@ -719,10 +719,14 @@ Most providers (Claude, Antigravity, Codex, Copilot, Muse) come with built-in mo
 
 ##### Muse models and the contributor tradeoff
 
-Muse exposes its built-in models as reasoning-effort variants over two underlying CLI models:
+Muse exposes its built-in models as reasoning-effort variants over four underlying CLI models:
 
 | Model ID | Tier | CLI model |
 |----------|------|-----------|
+| `muse-wonder-1.0-high` | thorough | `muse-wonder-1.0` |
+| `muse-wonder-1.0-max` | thorough | `muse-wonder-1.0` |
+| `muse-wonder-full-1.0-high` | thorough | `muse-wonder-full-1.0` |
+| `muse-wonder-full-1.0-max` | thorough | `muse-wonder-full-1.0` |
 | `muse-spark-1.3-max` | thorough | `muse-spark-1.3` |
 | `muse-spark-1.3-contributor-max` | thorough | `muse-spark-1.3-contributor` |
 | `muse-spark-1.3-xhigh` | thorough | `muse-spark-1.3` |
@@ -731,6 +735,8 @@ Muse exposes its built-in models as reasoning-effort variants over two underlyin
 | `muse-spark-1.3-contributor-high` | balanced | `muse-spark-1.3-contributor` |
 | `muse-spark-1.3-low` | fast | `muse-spark-1.3` |
 | `muse-spark-1.3-contributor-low` | fast | `muse-spark-1.3-contributor` |
+
+Muse Wonder (released October 2026) is Meta's frontier model line. `muse-wonder-1.0` costs $4/M input and $20/M output, several times Muse Spark, so it sits in the thorough tier and is not the default. `muse-wonder-full-1.0` is the larger variant. It is available only with a Muse Code Power Usage or Maximum Usage subscription and is not served through the pay-as-you-go API; other accounts get a "does not exist or you lack access" error. Muse Code subscriptions turn contributor mode on by default, so every Wonder entry passes `--contributor-mode off` for the run. `muse-wonder-1.0`/`muse-wonder` and `muse-wonder-full-1.0`/`muse-wonder-full` are aliases for the matching `-high` entries.
 
 `muse-spark-1.3` and `muse-spark` are convenience aliases for `muse-spark-1.3-high`. `muse-spark-1.3-contributor` is likewise an alias for `muse-spark-1.3-contributor-high` — worth knowing because it is the bare CLI model name, so `--model muse-spark-1.3-contributor` selects the data-sharing tier described below rather than erroring out.
 
@@ -797,7 +803,7 @@ You can override provider settings and define custom models in your config file.
 | `advisor` | OMP only. Set to `true` to enable OMP's advisor runtime during analysis (`--advisor`). Defaults to `false`: pair-review disables the advisor via a bundled config overlay, even when it is enabled in your global OMP configuration. |
 | `models` | Array of model definitions (see below) |
 | `default_model` | Model `id` to use as the provider's default (in the picker and when no model is specified). Preferred over the per-model `default: true` flag. If it names an unknown or disabled model, the provider falls back to automatic selection. |
-| `disabled_models` | Array of model selectors to hide, matched by model `id` or alias. Disabled models disappear from the model picker for that provider. Works on built-in models too, so you can remove a built-in option without redefining the rest. A list that would hide *every* model is ignored. |
+| `disabled_models` | Array of canonical model `id`s to hide. Aliases (such as `opus`, or a retired id that now redirects to a newer model) are not matched and log a warning. Disabled models disappear from the model picker for that provider. Works on built-in models too, so you can remove a built-in option without redefining the rest. A list that would hide *every* model is ignored. |
 
 #### Model Configuration Fields
 
@@ -833,7 +839,7 @@ Use the provider-level `default_model` and `disabled_models` fields to tailor wh
 }
 ```
 
-- `disabled_models` removes those models from the picker. It matches by model id or alias, so either a canonical id (`opus-4.8-xhigh`) or a convenience alias (`opus`) works. To find the built-in IDs for a provider, see the comments in `config.example.json` (e.g. Claude ships `opus-4.8-xhigh`, `sonnet-4.6`, `haiku`, …).
+- `disabled_models` removes those models from the picker. It matches canonical ids only (`opus-5.5-xhigh`, not the `opus` alias). An alias entry is ignored with a warning, so hiding a retired id such as `opus-4.7-high` never hides the newer model it now redirects to. To find the built-in IDs for a provider, see the comments in `config.example.json` (e.g. Claude ships `opus-5.5-medium`, `sonnet-4.6`, `haiku`, …).
 - `default_model` selects which of the *remaining* models is the default. If it points at a model that is unknown or also disabled, the provider falls back to automatic selection (the model marked `default: true`, then the first `balanced`-tier model, then the first model).
 - Prefer `default_model` over the per-model `default: true` flag, which is deprecated. Setting `default_model` suppresses the deprecation warning.
 
@@ -911,7 +917,7 @@ npm install -g @mariozechner/pi-coding-agent
 
 Configure your preferred models in `providers.pi.models` — see [AI Provider Configuration](#ai-provider-configuration) for details. Everything else in pair-review works without Pi installed.
 
-[OMP (Oh My Pi)](https://github.com/can1357/oh-my-pi), a fork of Pi, is also available as a chat provider (`omp`) — it speaks the same RPC protocol through the `omp` CLI (`npm install -g @oh-my-pi/pi-coding-agent`) and uses whatever model your OMP configuration selects (set a chat model via `chat_providers.omp.model`; values are passed to `omp --model`, which fuzzy-matches). Unlike Pi chat, OMP chat does not load pair-review's task extension for subagent delegation.
+[OMP (Oh My Pi)](https://github.com/can1357/oh-my-pi), a fork of Pi, is also available as a chat provider (`omp`) — it speaks the same RPC protocol through the `omp` CLI (`npm install -g @oh-my-pi/pi-coding-agent`) and uses whatever model your OMP configuration selects (set a chat model via `chat_providers.omp.model`; values are passed to `omp --model`, which fuzzy-matches). Unlike Pi chat, OMP chat does not load pair-review's task extension; subagent delegation uses OMP's built-in `task` tool instead.
 
 **Choosing a model:** The chat header includes a model picker, fed by the same per-provider model catalog used for AI review analysis (`providers.<id>.models` and `disabled_models` both apply; `default_model` does not — it is the *analysis* default, and chat's starting selection comes from `chat_providers.<id>.model` — see [AI Provider Configuration](#ai-provider-configuration)). The model is chosen before the first message is sent; once a conversation has messages, picking a different model opens a new tab (after a one-time "Start a new conversation?" dialog with a "Don't ask again" checkbox) rather than switching the model mid-conversation — pair-review keeps one model per chat by design. "Provider default" means the configured `chat_providers.<id>.model` if set, otherwise the CLI's own default. pair-review remembers the last model you picked for each provider in this browser and uses it as the starting model for new conversations (picking "Provider default" is remembered too). Effort variants like `opus-5-high` carry their effort env/flags into chat the same way they do for analysis.
 
